@@ -106,6 +106,7 @@ def extract_latent_and_attention(tft, dataset: TimeSeriesDataSet, batch_size: in
 
             
             z_t = latent_cache["z_t"]
+            z_t = z_t.reshape(z_t.shape[0], -1)
 
             all_latents.append(z_t.cpu())
             all_attention.append(attn_mean.cpu())
