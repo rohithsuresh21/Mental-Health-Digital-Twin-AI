@@ -15,7 +15,7 @@ class GaussianCopulaAnomalyDetector:
         self.is_fitted: bool = False
 
     def fit(self, X: np.ndarray) -> "GaussianCopulaAnomalyDetector":
-        X_arr = np.asarray(X, dtype= np.float64)
+        X_arr = np.asarray(X, dtype=np.float64)
         n_samples, self.n_features = X_arr.shape
 
         self.train_marginal_data = [X_arr[:, j] for j in range(self.n_features)]
@@ -26,7 +26,7 @@ class GaussianCopulaAnomalyDetector:
             uniform_values = ranks / (n_samples + 1)
             Z_space[:, j] = norm.ppf(np.clip(uniform_values, self.epsilon, 1.0 - self.epsilon))
 
-            R = np.corrcoef(Z_space, rowvar=False)
+        R = np.corrcoef(Z_space, rowvar=False)
         if self.n_features == 1:
             R = np.array([[1.0]])
 
@@ -44,7 +44,7 @@ class GaussianCopulaAnomalyDetector:
         return self
     
     def _calculate_negative_log_likelihood(self, X: np.ndarray) -> np.ndarray:
-        n_samples = X.shape
+        n_samples = X.shape[0]
         Z_space = np.zeros((n_samples, self.n_features))
         
         for j in range(self.n_features):
@@ -58,12 +58,11 @@ class GaussianCopulaAnomalyDetector:
         left_dot = np.dot(Z_space, self.copula_covariance_pinv - np.eye(self.n_features))
         quadratic_score = 0.5 * np.sum(left_dot * Z_space, axis=1)
         
-       
         return quadratic_score + 0.5 * self.copula_det_log
 
     def predict_score(self, X: np.ndarray) -> np.ndarray:
         if not self.is_fitted:
-            raise RuntimeError("Gaussian Copula instance engine must execute training fit cycle before inference processing.")
+            raise RuntimeError("Gaussian Copula not fitted. Call fit() first.")
         X_arr = np.asarray(X, dtype=np.float64)
         raw_nll = self._calculate_negative_log_likelihood(X_arr)
         
