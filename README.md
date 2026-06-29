@@ -226,8 +226,8 @@ Key libraries:
 
 **Institution**: IIT Indore  
 **Program**: Summer of Code 2026 (IITISoC)  
-**Team**: AI/ML Development  
-**Status**: Production-Ready
+**Team**: AIML_25
+**Status**: Under-Progress
 
 ---
 
