@@ -3,7 +3,7 @@ import numpy as np
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
-
+import random
 
 HEALTHY = [
     "Had a great day at work, got everything done and even had time to catch up with a friend over coffee.",
