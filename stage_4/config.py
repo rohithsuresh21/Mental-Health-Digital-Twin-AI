@@ -12,7 +12,7 @@ class PipelineConfig:
 
     KNN_K: int = 5
     KNN_ALGORITHM: str = "auto"
-    KNN_METRIC: str = "mahalanobis"
+    KNN_METRIC: str = "euclidean"
 
     DETECTOR_WEIGHTS: Dict[str, float] = {
         "mahalanobis": 0.35,
