@@ -1,13 +1,13 @@
 import pickle
 import numpy as np
 from typing import Dict, Any, Union, List
-from config import PipelineConfig
-from utils.preprocessing import NativeFeatureSanitizer
-from utils.thresholds import StaticPercentileEngine
-from detectors.mahalanobis import ProductionMahalanobisDetector
-from detectors.copula import GaussianCopulaAnomalyDetector
-from detectors.isolation_forest import ProductionIsolationForestDetector
-from detectors.knn_detector import NativeKnnDistanceDetector
+from .config import PipelineConfig
+from .utils.preprocessing import NativeFeatureSanitizer
+from .utils.thresholds import StaticPercentileEngine
+from .detectors.mahalanobis import ProductionMahalanobisDetector
+from .detectors.copula import GaussianCopulaAnomalyDetector
+from .detectors.isolation_forest import ProductionIsolationForestDetector
+from .detectors.knn_detector import NativeKnnDistanceDetector
 
 class MultiDetectorPipeline:
     def __init__(self) -> None:
@@ -66,7 +66,7 @@ class MultiDetectorPipeline:
         for i in range(n_samples):
             m_s = scores_dict["mahalanobis"][i]
             c_s = scores_dict["copula"][i]
-            if_s = scores_dict["isolation"][i]
+            if_s = scores_dict["isolation_forest"][i]
             k_s = scores_dict["knn"][i]
 
             risk = (m_s * w["mahalanobis"] + 
@@ -81,7 +81,7 @@ class MultiDetectorPipeline:
             if_anom = self.threshold_engine.eval_status("isolation_forest", if_s)
             k_anom = self.threshold_engine.eval_status("knn", k_s)
 
-            is_anomaly_flags.append(m_anom, c_anom, if_anom, k_anom)
+            is_anomaly_flags.append([m_anom, c_anom, if_anom, k_anom])
 
             detailed_records.append({
                 "mahalanobis": m_s,
@@ -90,18 +90,18 @@ class MultiDetectorPipeline:
                 "knn": k_s
             })
 
-            return {
+        return {
                 "metrics_summary": detailed_records,
                 "overall_risk_score": overall_risk_scores,
                 "is_anomaly": is_anomaly_flags
             }
         
-        def save(self, filepath: str) -> None:
+    def save(self, filepath: str) -> None:
             with open(filepath, "wb") as output_stream:
                 pickle.dump(self, output_stream)
 
-        @staticmethod
-        def load(filepath: str) -> "MultiDetectorPipeline"        :
+    @staticmethod
+    def load(filepath: str) -> "MultiDetectorPipeline"        :
             with open(filepath, "rb") as input_stream:
                 return pickle.load(input_stream)       
 
