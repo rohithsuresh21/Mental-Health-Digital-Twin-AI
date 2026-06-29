@@ -22,7 +22,7 @@ class NativeFeatureSanitizer:
         self.non_constant_mask = self.stds > 1e-7
 
         if not np.any(self.non_constant_mask):
-            self.non_constant_mask = True
+            self.non_constant_mask = np.ones(X_arr.shape[1], dtype=bool)
 
         self.is_fitted = True
         return self
@@ -32,7 +32,7 @@ class NativeFeatureSanitizer:
             raise   ValueError("Sanitizer runtime instance requires fitting prior to invoking transform operation.")
         X_arr = np.asarray(X, dtype=np.float64).copy()
 
-        for j in range(X_arr.shape):
+        for j in range(X_arr.shape[1]):
             X_arr[np.isnan(X_arr[:, j]), j] = self.means[j]
 
         return X_arr[:, self.non_constant_mask]
