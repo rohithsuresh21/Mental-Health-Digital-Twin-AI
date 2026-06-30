@@ -36,37 +36,6 @@ FEATURE_COLS = (
              [f'audio_mask_{i}' for i in range(11)]
         )
 
-def extract_window(end_date, daily_df, window_size=14):
-    # if feature_cols is None:
-    
-    feature_cols = [c for c in daily_df.columns if c not in ["uid", "date"]]
-        
-    # Compute start_date
-    start_date = end_date - timedelta(days=window_size)
-
-    daily_df["date"] = pd.to_datetime(daily_df["date"])
-    daily_df = daily_df.sort_values(by="date")
-
-    # filter between start_date and end_date
-    filtered = daily_df[daily_df["date"].between(start_date, end_date, inclusive="left")]
-
-    #Ensures that we get exactly 466 columns even if some are missing
-    # window_df = filtered[feature_cols].reindex(columns=feature_cols)
-    window_df = filtered.reindex(columns=feature_cols)
-    n_days = window_df.shape[0]
-    # window = window_df.to_numpy()
-
-    if n_days == 0:
-        return None
-    elif n_days < window_size:
-        # Padding at the top if the data is lesser
-        pad = np.zeros((window_size - n_days, len(feature_cols)))
-        window = np.vstack([pad, window_df.to_numpy()])
-        return window
-    elif n_days > window_size:
-        return (window_df.to_numpy()[-window_size:])
-    else:
-        return window_df.to_numpy()
 
 def is_window_valid(window):
     # Robust check when missing-value strategy is unknown
