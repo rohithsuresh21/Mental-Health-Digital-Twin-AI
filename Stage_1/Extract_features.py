@@ -9,6 +9,8 @@ from nltk.tokenize import sent_tokenize
 import re
 from datetime import datetime
 import textstat
+from pathlib import Path
+
 
 emotion_classifier = pipeline(task="text-classification", model="SamLowe/roberta-base-go_emotions", top_k=None)
 model=SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
@@ -275,11 +277,11 @@ def extract_features(text, timestamp=None, prev_timestamp=None,audio_path= None,
                                           activity_level, music_mood_score)
 
     if audio_path is not None:
-        from audio import audio_block
+        from .Extract_audio_features import audio_block
         audio_feature_vec, audio_feature_mask, transcript, acoustic_readable = \
            audio_block(audio_path)
     else:
-        from audio import empty_audio_block
+        from .Extract_audio_features import empty_audio_block
         audio_feature_vec, audio_feature_mask, transcript, acoustic_readable = \
             empty_audio_block()        
 
