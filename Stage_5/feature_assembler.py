@@ -38,7 +38,7 @@ FEATURE_COLS = (
 
 def extract_window(end_date, daily_df, window_size=14):
     # if feature_cols is None:
-    #     feature_cols = STUDENTLIFE_COLS
+    
     feature_cols = [c for c in daily_df.columns if c not in ["uid", "date"]]
         
     # Compute start_date
