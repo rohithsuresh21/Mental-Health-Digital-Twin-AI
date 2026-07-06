@@ -4,10 +4,7 @@ import numpy as np
 
 class TemporalBinning:
     def __init__(self, feature_dim=466):
-        """
-        Stage 4 — Temporal Binning Router.
-        [Morning, Afternoon, Evening] x [Weekday, Weekend]
-        """
+        
         self.feature_dim = feature_dim
         
         self.bin_names = [
@@ -18,18 +15,9 @@ class TemporalBinning:
         self.clear_buckets()
 
     def clear_buckets(self):
-        """
-        Initializes or resets the storage buffers for all 6 contextual bins. 
-        Only called at startup or when explicitly requested to clear the session.
-
-        """
         self.context_buckets = {bin_name: [] for bin_name in self.bin_names}
 
     def _determine_bin(self, timestamp_str):
-        """
-           Determines the appropriate bin for a given timestamp string.
-           Is called internally by route_vector to route the feature vector to the correct bucket.
-        """
        
         try:
             dt = datetime.datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
@@ -51,11 +39,6 @@ class TemporalBinning:
         return f"{time_label}_{day_label}"
 
     def route_vector(self, feature_vector, timestamp_str):
-        """
-        Args:
-            feature_vector (Tensor or ndarray):387-dimensional array slice.
-            timestamp_str (str): UTC or local string timestamp associated with the entry.
-        """
         # Convert to numpy if input is a torch tensor
         if isinstance(feature_vector, torch.Tensor):
             feature_vector = feature_vector.detach().cpu().numpy()
