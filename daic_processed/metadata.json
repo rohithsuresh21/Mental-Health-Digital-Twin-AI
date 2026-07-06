@@ -1,0 +1,7 @@
+{
+  "healthy_count": 2358,
+  "atrisk_count": 2643,
+  "total_vectors": 5001,
+  "feature_dimension": 466,
+  "ratio": "2358 : 2643"
+}
