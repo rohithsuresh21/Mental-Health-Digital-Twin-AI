@@ -22,11 +22,18 @@ class UserBaseline:
     INFERENCE_WINDOW   = 30
     REFIT_EVERY        = 30 
 
-    def __init__(self, user_id:str):
+    def __init__(self, user_id: str,baseline_window: int= BASELINE_WINDOW,inference_window:int=INFERENCE_WINDOW,min_entries_to_fit: int = MIN_ENTRIES_TO_FIT,refit_every: int= REFIT_EVERY):
         self.user_id=user_id
         self.raw_vecs: list[np.ndarray] = []
         self.scaler=None
         self.entry_count=0
+        self.last_refit= 0
+
+        self.baseline_window    = baseline_window
+        self.inference_window   = inference_window
+        self.min_entries_to_fit = min_entries_to_fit
+        self.refit_every        = refit_every
+
 
     def add_entry(self,raw_vec:np.ndarray):
         if raw_vec.shape!=(self.VECTOR_DIM,):
@@ -34,15 +41,16 @@ class UserBaseline:
         self.raw_vecs.append(raw_vec.copy())
         self.entry_count += 1
         
-        if len(self.raw_vecs) > self.BASELINE_WINDOW:
-            self.raw_vecs = self.raw_vecs[-self.BASELINE_WINDOW:]
-
-        if self.entry_count == self.MIN_ENTRIES_TO_FIT:
+        if self.entry_count == self.min_entries_to_fit:
             self._fit_scaler()
-        elif (self.entry_count > self.MIN_ENTRIES_TO_FIT and
-            self.entry_count % self.REFIT_EVERY == 0):
+            self.last_refit = self.entry_count
+        elif (self.entry_count > self.min_entries_to_fit and
+              self.entry_count - self.last_refit >= self.refit_every):
             self._fit_scaler()
-           
+            self.last_refit = self.entry_count
+            
+        if len(self.raw_vecs) > self.baseline_window:
+            self.raw_vecs = self.raw_vecs[-self.baseline_window:]
         
     def _fit_scaler(self):
         recent = np.array(self.raw_vecs)
@@ -89,3 +97,14 @@ class UserBaseline:
     @property
     def calibrated(self) -> bool:
         return self.scaler is not None
+
+    def calibration_status(self) -> dict:
+        """Returns calibration state for frontend/pipeline consumption."""
+        return {
+            "calibrated":           self.calibrated,
+            "entries_so_far":       self.entry_count,
+            "entries_needed":       self.min_entries_to_fit,
+            "calibration_progress": f"{min(self.entry_count, self.min_entries_to_fit)}/{self.min_entries_to_fit}",
+            "last_refit_at":        self.last_refit,
+            "next_refit_at":        self.last_refit + self.refit_every if self.calibrated else self.min_entries_to_fit,
+        }    
