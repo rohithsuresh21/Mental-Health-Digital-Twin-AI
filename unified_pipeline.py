@@ -9,8 +9,10 @@ from typing import Dict, Any, List, Optional, Tuple
 from pathlib import Path
 
 from Stage_1.Extract_features import extract_features
-from stage_2.normalization import Stage2Normalization
+from stage_2.baseline import UserBaseline
+from stage_2.temporal_bin import TemporalBinning
 from stage_3.tft_model import run_stage3, build_dataframe, extract_latent_and_attention
+from stage_4.detectors.cusum import CUSUMDetector
 from stage_4.anomaly_pipeline import MultiDetectorPipeline
 from stage_4.config import PipelineConfig
 
@@ -29,9 +31,9 @@ class UnifiedJournalPipeline:
     def __init__(self, output_dir: str = "pipeline_outputs"):
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
-        self.normalizer = Stage2Normalization(
-            baseline_dir=os.path.join(output_dir, "baselines")
-        )
+        self.user_baselines = {}
+        self.temporal_binner = TemporalBinning()
+        self.calibration_flags = {}
 
         self.tft_model = None
         self.anomaly_detector = None
@@ -45,6 +47,7 @@ class UnifiedJournalPipeline:
         self.user_data = {} 
         self.user_labels = {}
         self._user_id_mapping = {}
+        self.cusum_detectors = {}
 
         # Load pretrained DAIC-WOZ model on startup
         self._load_daic_model()
@@ -143,28 +146,40 @@ class UnifiedJournalPipeline:
         self,
         feature_vec: np.ndarray,
         user_id: str,
-        timestamp: datetime,
-        context_bin: str = "global"
+        timestamp: datetime
     ) -> Dict[str, Any]:
         try:
-            packaged_stage1 = {
-                "user_id": user_id,
-                "timestamp": timestamp,
-                "feature_vector": feature_vec,
-                "context_bin": context_bin,
-                "readables": {}
-            }
-            
-            normalized = self.normalizer.process(packaged_stage1)
+            if user_id not in self.user_baselines:
+                self.user_baselines[user_id] = UserBaseline(user_id=user_id)
+
+            baseline = self.user_baselines[user_id]
+            baseline.add_entry(feature_vec)
+
+            context_bin = self.temporal_binner.route_vector(feature_vec, timestamp.isoformat())
+
+            z_scored_vec = baseline.normalise(feature_vec)
+            was_calibrated = z_scored_vec is not None
+            if z_scored_vec is None:
+                z_scored_vec = feature_vec
+
             if user_id not in self.normalized_vectors:
                 self.normalized_vectors[user_id] = []
-            
-            self.normalized_vectors[user_id].append(normalized["z_scored_vector"])
-            
+            if user_id not in self.calibration_flags:
+                self.calibration_flags[user_id] = []
+
+            self.normalized_vectors[user_id].append(z_scored_vec)
+            self.calibration_flags[user_id].append(was_calibrated)
+
             print(f"Stage 2 complete for user {user_id}: normalized features")
-            
-            return normalized
-            
+
+            return {
+                "user_id": user_id,
+                "timestamp": timestamp,
+                "context_bin": context_bin,
+                "z_scored_vector": z_scored_vec,
+                "readables": {}
+            }
+
         except Exception as e:
             print(f"Stage 2 error for user {user_id}: {str(e)}")
             raise
@@ -249,59 +264,87 @@ class UnifiedJournalPipeline:
         
         return patched
     
-    def train_anomaly_detector(self, use_latent_features: bool = True) -> None:
+    def train_anomaly_detector(self, use_latent_features: bool = False) -> None:
         try:
-            if use_latent_features and self.tft_model:
-                X_train = np.array(self.tft_model["latents"])
-                print(f"Using TFT latent features: shape {X_train.shape}")
-            else:
-                all_vectors = []
-                for vectors in self.normalized_vectors.values():
+            model_path     = os.path.join("calibration", "models", "stage4_detectors.pkl")
+            threshold_path = os.path.join("calibration", "models", "stage4_threshold_engine.pkl")
+
+            if os.path.exists(model_path) and os.path.exists(threshold_path):
+                from stage4_deployment import Stage4DeploymentPipeline
+                self.anomaly_detector = Stage4DeploymentPipeline(model_path, threshold_path)
+                print("Stage 4 complete: loaded pretrained DAIC-WOZ detectors")
+                return
+
+            all_vectors = []
+            for user_id, vectors in self.normalized_vectors.items():
+                flags = self.calibration_flags.get(user_id, [True] * len(vectors))
+                calibrated_vectors = [v for v, f in zip(vectors, flags) if f]
+                if calibrated_vectors:
+                    all_vectors.extend(calibrated_vectors)
+                else:
                     all_vectors.extend(vectors)
-                X_train = np.array(all_vectors)
-                print(f"Using normalized features: shape {X_train.shape}")
-    
+            X_train = np.array(all_vectors)
+            print(f"Stage 4: no pretrained models found — training fresh on calibrated data, shape {X_train.shape}")
+
             assert X_train.shape[0] > 0, "No training data available"
             assert not np.any(np.isnan(X_train)), "NaN values in training data"
-            
-            try:
-                self.anomaly_detector = MultiDetectorPipeline()
-                self.anomaly_detector.fit(X_train)
-            except TypeError as te:
-                if "__init__() should return None" in str(te):
-                    print("Stage 4 error: MultiDetectorPipeline detector __init__ returns object instead of None")
-                    print("WORKAROUND: Check MultiDetectorPipeline or detector class implementations")
-                    print("  Detectors (KNN, Isolation Forest, etc.) __init__ should not return 'self'")
-                raise
-            
+
+            self.anomaly_detector = MultiDetectorPipeline()
+            self.anomaly_detector.fit(X_train)
+
             detector_path = os.path.join(self.output_dir, "anomaly_detector.pkl")
             self.anomaly_detector.save(detector_path)
-            
-            print(f"Stage 4 complete: Anomaly detector trained and saved")
-            
+
+            print(f"Stage 4 complete: anomaly detector trained and saved")
+
         except Exception as e:
             print(f"Stage 4 error: {str(e)}")
             raise
-    
+
     def detect_anomalies(self, feature_vec: np.ndarray, use_latent: bool = False) -> Dict[str, Any]:
         if self.anomaly_detector is None:
             raise ValueError("Anomaly detector not trained. Call train_anomaly_detector first.")
-    
+
         try:
             X = np.array([feature_vec])
-            results = self.anomaly_detector.predict(X)
-        
-            return {
-            "overall_risk_score": float(results["overall_risk_score"][0]),
-            "is_anomaly": results["is_anomaly"][0],
-            "detector_scores": results["metrics_summary"][0],
-            "timestamp": datetime.now().isoformat()
-            }
-        
+
+            if hasattr(self.anomaly_detector, '_detect_anomalies'):
+                results = self.anomaly_detector._detect_anomalies(X)
+                return {
+                    "overall_risk_score": float(results["overall_risk_score"]),
+                    "is_anomaly":         results["is_anomaly"],
+                    "detector_scores":    results["detector_scores"],
+                    "timestamp":          datetime.now().isoformat()
+                }
+            else:
+                results = self.anomaly_detector.predict(X)
+                return {
+                    "overall_risk_score": float(results["overall_risk_score"][0]),
+                    "is_anomaly":         results["is_anomaly"][0],
+                    "detector_scores":    results["metrics_summary"][0],
+                    "timestamp":          datetime.now().isoformat()
+                }
+
         except Exception as e:
             print(f"Anomaly detection error: {str(e)}")
             raise
-    
+
+    def fit_and_run_cusum(self, user_id) -> list:
+        score = self.anomaly_scores[user_id]
+        detector = CUSUMDetector()
+        detector.fit(np.array([a["overall_risk_score"] for a in score]))
+
+        cusum_result = []
+        for s in score:
+            result_dict = detector.update_score(s["overall_risk_score"])
+            cusum_result.append(result_dict)
+
+        self.cusum_detectors[user_id] = detector
+        
+        return cusum_result
+
+
+
     def process_entry(
         self,
         user_id: str,
@@ -313,7 +356,6 @@ class UnifiedJournalPipeline:
         activity_level: Optional[float] = None,
         music_mood_score: Optional[float] = None,
         prev_timestamp: Optional[datetime] = None,
-        context_bin: str = "global",
         label: Optional[int] = None
     ) -> Dict[str, Any]:
         
@@ -339,8 +381,7 @@ class UnifiedJournalPipeline:
         normalized = self.normalize_features(
             feature_vec=feature_vec,
             user_id=user_id,
-            timestamp=timestamp,
-            context_bin=context_bin
+            timestamp=timestamp
         )
 
         if label is not None:
@@ -352,7 +393,9 @@ class UnifiedJournalPipeline:
                 "readable_metrics": readable
             },
             "stage_2": {
-                "normalized_vector_shape": normalized["z_scored_vector"].shape
+                "normalized_vector_shape": normalized["z_scored_vector"].shape,
+                "context_bin": normalized["context_bin"],
+                "calibrated": self.user_baselines[user_id].calibrated
             },
             "stage_2_output": {
                 "z_scored_vector": normalized["z_scored_vector"]
@@ -362,9 +405,22 @@ class UnifiedJournalPipeline:
         
         if self.anomaly_detector:
             anomaly_result = self.detect_anomalies(normalized["z_scored_vector"])
+
+            prev_scores = self.anomaly_scores.get(user_id, [])
+            if len(prev_scores) >= 1:
+                prev_flag = prev_scores[-1].get("is_anomaly", False)
+                curr_flag = anomaly_result.get("is_anomaly", False)
+                if isinstance(prev_flag, (list, np.ndarray)):
+                    prev_flag = any(prev_flag)
+                if isinstance(curr_flag, (list, np.ndarray)):
+                    curr_flag = any(curr_flag)
+                anomaly_result["is_persistent_anomaly"] = bool(prev_flag and curr_flag)
+            else:
+                anomaly_result["is_persistent_anomaly"] = False
+
             result["stage_4"] = anomaly_result
             result["status"] += " + Stage 4"
-            
+
             if user_id not in self.anomaly_scores:
                 self.anomaly_scores[user_id] = []
             self.anomaly_scores[user_id].append(anomaly_result)
@@ -377,25 +433,26 @@ class UnifiedJournalPipeline:
         anomaly_scores: Optional[List[Dict[str, Any]]] = None
     ) -> np.ndarray:
         window = np.array(window_vectors)
-        
+
         if window.shape[0] == 0:
             raise ValueError("No vectors in window")
-        
+
         features = []
-        
+
         for stat_name in ["mean", "std", "max", "min"]:
             stat_func = getattr(np, f"nan{stat_name}")
             stats = stat_func(window, axis=0)
             features.extend(stats)
-        
-        if window.shape[0] >= 3:
-            early_mean = np.nanmean(window[:3], axis=0)
-            late_mean = np.nanmean(window[-3:], axis=0)
+
+        delta_window = max(3, window.shape[0] // 5)
+        if window.shape[0] >= delta_window * 2:
+            early_mean = np.nanmean(window[:delta_window], axis=0)
+            late_mean  = np.nanmean(window[-delta_window:], axis=0)
             deltas = early_mean - late_mean
         else:
             deltas = np.zeros(window.shape[1])
         features.extend(deltas)
-        
+
         if anomaly_scores and len(anomaly_scores) > 0:
             latest_anomaly = anomaly_scores[-1]
             anomaly_features = np.array([
@@ -408,13 +465,13 @@ class UnifiedJournalPipeline:
             ])
         else:
             anomaly_features = np.zeros(6)
-        
+
         features.extend(anomaly_features)
-        
+
         feature_vector = np.nan_to_num(np.array(features))
-        
+
         print(f"Stage 5 features assembled: shape {feature_vector.shape}")
-        
+
         return feature_vector
     
     def train_xgboost_classifier(
@@ -427,7 +484,7 @@ class UnifiedJournalPipeline:
         if not STAGE5_AVAILABLE:
             raise RuntimeError("XGBoost not installed. Install with: pip install xgboost scikit-learn")
 
-        # Skip retraining if pretrained DAIC model is already loaded
+
         if self.xgb_model is not None:
             print("[Stage 5] Using pretrained DAIC-WOZ model — skipping retraining.")
             return {"model": self.xgb_model, "auroc": None, "f1": None, "n_features": None}
