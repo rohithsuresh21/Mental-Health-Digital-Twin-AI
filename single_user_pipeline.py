@@ -3,6 +3,7 @@ import numpy as np
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
+from collections import Counter
 import random
 
 HEALTHY = [
@@ -42,7 +43,7 @@ AT_RISK = [
 
 def _sf(val):
     try:
-        return float(val) if str(val).strip() not in ("","None","nan","NaN") else None
+        return float(val) if str(val).strip() not in ("", "None", "nan", "NaN") else None
     except Exception:
         return None
 
@@ -64,13 +65,13 @@ def load_any_file(path: str) -> list[dict]:
         with open(path, newline="", encoding="utf-8") as f:
             rows = list(csv.DictReader(f))
         return [{
-            "text":             r.get("text", r.get("journal", r.get("entry", r.get("message","")))).strip(),
+            "text":             r.get("text", r.get("journal", r.get("entry", r.get("message", "")))).strip(),
             "timestamp":        _pts(r.get("timestamp", r.get("date", ""))),
             "sleep_hours":      _sf(r.get("sleep_hours")),
             "sleep_quality":    _sf(r.get("sleep_quality")),
             "activity_level":   _sf(r.get("activity_level")),
             "music_mood_score": _sf(r.get("music_mood_score")),
-        } for r in rows if r.get("text","").strip()]
+        } for r in rows if r.get("text", "").strip()]
 
     elif suffix == ".json":
         import json as _json
@@ -79,16 +80,16 @@ def load_any_file(path: str) -> list[dict]:
         if isinstance(data, dict):
             data = [data]
         return [{
-            "text":             d.get("text", d.get("journal", d.get("entry",""))).strip(),
-            "timestamp":        _pts(d.get("timestamp", d.get("date",""))),
+            "text":             d.get("text", d.get("journal", d.get("entry", ""))).strip(),
+            "timestamp":        _pts(d.get("timestamp", d.get("date", ""))),
             "sleep_hours":      _sf(d.get("sleep_hours")),
             "sleep_quality":    _sf(d.get("sleep_quality")),
             "activity_level":   _sf(d.get("activity_level")),
             "music_mood_score": _sf(d.get("music_mood_score")),
-        } for d in data if d.get("text","").strip()]
+        } for d in data if d.get("text", "").strip()]
 
     elif suffix == ".txt":
-        lines = [l.strip() for l in Path(path).read_text(encoding="utf-8",errors="ignore").splitlines() if l.strip()]
+        lines = [l.strip() for l in Path(path).read_text(encoding="utf-8", errors="ignore").splitlines() if l.strip()]
         base  = datetime.now() - timedelta(days=len(lines))
         return [{"text": l, "timestamp": base + timedelta(days=i),
                  "sleep_hours": None, "sleep_quality": None,
@@ -165,6 +166,7 @@ def run_single_user(user_id: str, file_path: Optional[str] = None,
     prev_ts = None
     sentiment_series, sleep_series, activity_series, music_series = [], [], [], []
     emotions_series, timestamps = [], []
+    context_bin_series = []
 
     for rec in records:
         result = pipeline.process_entry(
@@ -182,6 +184,7 @@ def run_single_user(user_id: str, file_path: Optional[str] = None,
         sentiment_series.append(round(m["sentiment_score"], 4))
         emotions_series.append(m["dominant_emotion"])
         timestamps.append(rec["timestamp"])
+        context_bin_series.append(result["stage_2"]["context_bin"])
         if rec["sleep_hours"] is not None:
             sleep_series.append((rec["timestamp"], rec["sleep_hours"]))
         if rec["activity_level"] is not None:
@@ -189,30 +192,112 @@ def run_single_user(user_id: str, file_path: Optional[str] = None,
         if rec["music_mood_score"] is not None:
             music_series.append((rec["timestamp"], rec["music_mood_score"]))
 
-    # Train TFT and anomaly detector on user data only (no fake reference users)
     n = len(records)
+
+    if n >= 60:
+        num_patches = 14
+        hidden_size = 64
+        max_epochs  = 10
+        batch_size  = 16
+    elif n >= 30:
+        num_patches = 10
+        hidden_size = 48
+        max_epochs  = 7
+        batch_size  = 12
+    else:
+        num_patches = min(10, max(3, n - 1))
+        hidden_size = 32
+        max_epochs  = 5
+        batch_size  = 8
+
     tft = pipeline.train_tft_model(
-        num_patches=min(10, max(3, n - 1)),
-        hidden_size=32,
-        max_epochs=5,
-        batch_size=8,
+        num_patches=num_patches,
+        hidden_size=hidden_size,
+        max_epochs=max_epochs,
+        batch_size=batch_size,
     )
 
-    pipeline.train_anomaly_detector(use_latent_features=False)
+    model_dir = Path("calibration/models")
+    detectors_file = model_dir / "stage4_detectors.pkl"
+    threshold_file = model_dir / "stage4_threshold_engine.pkl"
+
+    if detectors_file.exists() and threshold_file.exists():
+        print(f"Stage 4: Loading pretrained calibration models from {model_dir}...")
+        import pickle
+        with open(detectors_file, "rb") as f:
+            pipeline.detectors = pickle.load(f)
+        with open(threshold_file, "rb") as f:
+            pipeline.threshold_engine = pickle.load(f)
+    else:
+        print("Stage 4: Pretrained models missing – falling back to dynamic context initialization...")
+        pipeline.train_anomaly_detector(use_latent_features=False)
+
     anomaly_results = []
     for vec in pipeline.normalized_vectors[user_id]:
         anomaly_results.append(pipeline.detect_anomalies(vec))
 
-    # Store anomaly results
     pipeline.anomaly_scores[user_id] = anomaly_results
+     
+    cusum_results = pipeline.fit_and_run_cusum(user_id)
+    cusum_threshold = round(float(pipeline.cusum_detectors[user_id].h), 4)
 
-    # XGBoost uses pretrained DAIC model — no retraining needed
     xgb = pipeline.train_xgboost_classifier()
 
     vecs      = pipeline.normalized_vectors[user_id]
     anomalies = pipeline.anomaly_scores.get(user_id, [])
-    features  = pipeline.assemble_stage5_features(vecs, anomalies)
-    prediction = pipeline.predict_classification(features)
+    if len(vecs) < 5:
+        print(f"[Stage 5] Only {len(vecs)} entries — skipping classification, need at least 5.")
+        prediction = {
+        "probability": 0.0,
+        "risk_level": "LOW",
+        "intervention_recommended": False,
+        "prediction": 0,
+        "note": "insufficient entries for reliable classification"
+    }
+    else:
+        features = pipeline.assemble_stage5_features(vecs, anomalies)
+        print(f"DEBUG: n_entries={len(records)}, vecs={len(vecs)}, features_shape={features.shape}")
+        prediction = pipeline.predict_classification(features)
+
+    ub = pipeline.user_baselines[user_id]
+    calibration_status = ub.calibration_status()
+    cutoff = ub.min_entries_to_fit - 1
+
+    deviation_series = []
+    for i, vec in enumerate(vecs):
+        if i < cutoff:
+            deviation_series.append(None)
+        else:
+            text_part = vec[ub.TEXT_START:ub.TEXT_END]
+            audio_part = vec[ub.AUDIO_START:ub.AUDIO_END]
+            deviation = float(np.mean(np.abs(np.concatenate([text_part, audio_part]))))
+            deviation_series.append(round(deviation, 4))
+
+    valid_deviation = [v for v in deviation_series if v is not None]
+    if len(valid_deviation) >= 6:
+        k = max(3, len(valid_deviation) // 3)
+        early_avg = float(np.mean(valid_deviation[:k]))
+        late_avg = float(np.mean(valid_deviation[-k:]))
+        diff = late_avg - early_avg
+        if diff > 0.15:
+            baseline_trend = "moving_away"
+        elif diff < -0.15:
+            baseline_trend = "returning_to_normal"
+        else:
+            baseline_trend = "stable"
+    else:
+        baseline_trend = "insufficient_data"
+
+    bin_labels = {
+        "Morning_Weekday":   "Morning (Weekday)",
+        "Afternoon_Weekday": "Afternoon (Weekday)",
+        "Evening_Weekday":   "Evening (Weekday)",
+        "Morning_Weekend":   "Morning (Weekend)",
+        "Afternoon_Weekend": "Afternoon (Weekend)",
+        "Evening_Weekend":   "Evening (Weekend)",
+    }
+    bin_counts_raw = Counter(context_bin_series)
+    context_bin_counts = {bin_labels.get(k, k): bin_counts_raw.get(k, 0) for k in bin_labels}
 
     return {
         "user_id":          user_id,
@@ -225,9 +310,19 @@ def run_single_user(user_id: str, file_path: Optional[str] = None,
         "music_series":     [(t.strftime("%Y-%m-%d"), v) for t, v in music_series],
         "anomaly_scores":   [round(a["overall_risk_score"], 4) for a in anomaly_results],
         "detector_scores":  [a["detector_scores"] for a in anomaly_results],
+        "cusum_upper":        [round(float(c["cusum_upper"]), 4) for c in cusum_results],
+        "cusum_lower":        [round(float(c["cusum_lower"]), 4) for c in cusum_results],
+        "cusum_alert_upper":  [bool(c["cusum_alert_upper"]) for c in cusum_results],
+        "cusum_alert_lower":  [bool(c["cusum_alert_lower"]) for c in cusum_results],
+        "cusum_threshold":    cusum_threshold,
+        "persistent_anomaly_flags": [bool(a.get("is_persistent_anomaly", False)) for a in anomaly_results],
         "prediction":       prediction,
         "tft_latent_shape": list(tft["latents"].shape),
         "xgb_auroc":        round(xgb["auroc"], 4) if xgb["auroc"] is not None and xgb["auroc"] == xgb["auroc"] else 0.0,
+        "calibration_status": calibration_status,
+        "baseline_deviation_series": deviation_series,
+        "baseline_trend": baseline_trend,
+        "context_bin_counts": context_bin_counts,
     }
 
 
