@@ -5,6 +5,93 @@ from flask import Flask, request, jsonify, render_template_string
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 32 * 1024 * 1024
 
+# ---------------------------------------------------------------------------
+# CUSUM state classification
+#
+# Four states, driven by the upper/lower CUSUM alert flags produced by
+# CUSUMDetector.update_score() (see cusum.py):
+#   1 = stable        -> upper below h AND lower below h
+#   2 = upper_alert    -> upper crossed h, lower did not (drifting above baseline)
+#   3 = lower_alert    -> lower crossed h, upper did not (drifting below baseline)
+#   4 = both_alert     -> both crossed h (oscillation)
+# ---------------------------------------------------------------------------
+
+CUSUM_STATUS_TEXT = {
+    1: {
+        "state": "stable",
+        "title": "Within your normal range",
+        "message": "Everything looks normal. Your current patterns are staying within your usual range. Keep maintaining your healthy routine.",
+    },
+    2: {
+        "state": "upper_alert",
+        "title": "Drifting above baseline",
+        "message": "We've noticed your readings are moving above your normal range. This may indicate your well-being is changing. Consider taking a moment to rest and monitor your condition.",
+    },
+    3: {
+        "state": "lower_alert",
+        "title": "Drifting below baseline",
+        "message": "Your readings are lower than your usual range. This could mean your body is calming down or responding differently than usual. Continue monitoring to ensure everything remains on track.",
+    },
+    4: {
+        "state": "both_alert",
+        "title": "Unusual oscillation detected",
+        "message": "Your readings are fluctuating above and below your normal range. This unusual pattern may require closer attention. Keep monitoring your condition and consider seeking guidance if it continues.",
+    },
+}
+
+
+def classify_cusum_state(alert_upper: bool, alert_lower: bool) -> int:
+    """Map a pair of CUSUM alert flags to one of the four states above."""
+    if alert_upper and alert_lower:
+        return 4
+    if alert_upper:
+        return 2
+    if alert_lower:
+        return 3
+    return 1
+
+
+def build_cusum_status(cusum_alert_upper: list, cusum_alert_lower: list, timestamps: list = None) -> dict:
+    states = [
+        classify_cusum_state(u, l)
+        for u, l in zip(cusum_alert_upper, cusum_alert_lower)
+    ]
+    latest_code = states[-1] if states else 1
+    latest = CUSUM_STATUS_TEXT[latest_code]
+
+    alert_indices = [i for i, s in enumerate(states) if s != 1]
+    had_alert_history = len(alert_indices) > 0
+    last_alert_index = alert_indices[-1] if had_alert_history else None
+    last_alert_code = states[last_alert_index] if had_alert_history else None
+    last_alert_date = (
+        timestamps[last_alert_index]
+        if had_alert_history and timestamps and last_alert_index < len(timestamps)
+        else None
+    )
+
+    result = {
+        "states": states,
+        "current_code": latest_code,
+        "current_state": latest["state"],
+        "current_title": latest["title"],
+        "current_message": latest["message"],
+        "had_alert_history": had_alert_history,
+    }
+
+    if had_alert_history and latest_code == 1:
+        last_alert_state = CUSUM_STATUS_TEXT[last_alert_code]["state"].replace("_", " ")
+        result["current_state"] = "recovered"
+        result["current_title"] = "Back within your normal range"
+        date_part = f" around {last_alert_date}" if last_alert_date else ""
+        result["current_message"] = (
+            f"You're currently within your usual range. There was a notable {last_alert_state}{date_part} "
+            "before things returned to baseline — worth keeping in mind alongside the current stability."
+        )
+        result["last_alert_date"] = last_alert_date
+        result["last_alert_state"] = last_alert_state
+
+    return result
+
 HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -199,6 +286,44 @@ HTML = r"""<!DOCTYPE html>
   .note.warn { border-color: var(--red); color: #a0522d; }
   .note.ok   { border-color: var(--green); color: #2e7d52; }
 
+  /* CUSUM status banner */
+  .cusum-banner {
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+    padding: 18px 20px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    margin-bottom: 24px;
+  }
+  .cusum-banner .dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    margin-top: 4px;
+    flex-shrink: 0;
+  }
+  .cusum-banner .body .title { font-size: 13px; font-weight: 500; color: var(--accent); margin-bottom: 4px; }
+  .cusum-banner .body .msg   { font-size: 12.5px; color: var(--dim); line-height: 1.7; }
+  .cusum-stable  { border-color: #1a2e1a; } .cusum-stable  .dot { background: var(--green); }
+  .cusum-upper   { border-color: #3a1a1a; } .cusum-upper   .dot { background: var(--red); }
+  .cusum-lower   { border-color: #16283a; } .cusum-lower   .dot { background: var(--blue); }
+  .cusum-both    { border-color: #2e2a1a; } .cusum-both    .dot { background: var(--purple); }
+  .cusum-recovered { border-color: #2e2a1a; } .cusum-recovered .dot { background: var(--amber); }
+
+  .progress-bar {
+    width: 100%;
+    height: 6px;
+    background: var(--border);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-top: 10px;
+  }
+  .progress-fill {
+    height: 100%;
+    background: var(--blue);
+    transition: width .3s;
+  }
+
   @media (max-width: 600px) {
     .chart-grid { grid-template-columns: 1fr; }
     .risk-block { flex-direction: column; gap: 24px; }
@@ -271,11 +396,60 @@ HTML = r"""<!DOCTYPE html>
     <hr class="divider">
 
     <div class="section">
+      <div class="section-label">Your personal baseline</div>
+      <div class="cusum-banner" id="baselineBanner">
+        <div class="dot"></div>
+        <div class="body">
+          <div class="title" id="baselineTitle">—</div>
+          <div class="msg" id="baselineMessage"></div>
+        </div>
+      </div>
+      <div class="chart-label" id="calibrationLabel" style="margin-bottom:6px;"></div>
+      <div class="progress-bar"><div class="progress-fill" id="calibrationFill" style="width:0%;"></div></div>
+    </div>
+
+    <hr class="divider">
+
+    <div class="section">
+      <div class="section-label">Trend stability (CUSUM)</div>
+      <div class="cusum-banner" id="cusumBanner">
+        <div class="dot"></div>
+        <div class="body">
+          <div class="title" id="cusumTitle">—</div>
+          <div class="msg" id="cusumMessage"></div>
+        </div>
+      </div>
+      <div class="chart-label" style="margin-bottom:14px;">
+        Cumulative drift above (upper) and below (lower) your baseline. A dashed line marks the alert threshold — crossing it signals a sustained shift, not just a single noisy entry.
+      </div>
+      <canvas id="cusumChart" style="max-height:220px;"></canvas>
+    </div>
+
+    <hr class="divider">
+
+    <div class="section">
       <div class="section-label">What's driving that signal</div>
       <div class="chart-label" style="margin-bottom:14px;">
-        Four different ways of looking for unusual patterns, shown side by side. When they agree, that's a stronger signal.
+        Four different ways of looking for unusual patterns, shown separately so each one is easy to read on its own. When they agree, that's a stronger signal.
       </div>
-      <canvas id="detectorChart" style="max-height:220px;"></canvas>
+      <div class="chart-grid">
+        <div class="chart-wrap">
+          <div class="chart-label">Mahalanobis</div>
+          <canvas id="detectorChartMahalanobis"></canvas>
+        </div>
+        <div class="chart-wrap">
+          <div class="chart-label">Copula</div>
+          <canvas id="detectorChartCopula"></canvas>
+        </div>
+        <div class="chart-wrap">
+          <div class="chart-label">Isolation forest</div>
+          <canvas id="detectorChartIsolationForest"></canvas>
+        </div>
+        <div class="chart-wrap">
+          <div class="chart-label">KNN</div>
+          <canvas id="detectorChartKnn"></canvas>
+        </div>
+      </div>
     </div>
 
   </div>
@@ -354,6 +528,14 @@ function mkBar(id, labels, datasets) {
   });
 }
 
+function movingAverage(arr, window=3) {
+  return arr.map((_, i) => {
+    const start = Math.max(0, i - window + 1);
+    const slice = arr.slice(start, i + 1);
+    return slice.reduce((a,b) => a+b, 0) / slice.length;
+  });
+}
+
 function renderResults(d) {
   document.getElementById("results").style.display = "block";
   const p = d.prediction;
@@ -391,14 +573,99 @@ function renderResults(d) {
     borderColor:"#c0392b", backgroundColor:"rgba(192,57,43,0.06)",
     tension:0.4, fill:true, pointRadius:3, borderWidth:1.5
   }], 0, 1);
+  
+  if (d.persistent_anomaly_flags?.length) {
+    const persistentDates = d.timestamps.filter((_, i) => d.persistent_anomaly_flags[i]);
+  if (persistentDates.length > 0) {
+    const div = document.createElement("div");
+    div.style.cssText = "margin-top:8px;font-size:11px;color:#c0392b;";
+    div.textContent = "⚠ Persistent signal on: " + persistentDates.join(", ");
+    document.getElementById("anomalyChart").parentNode.appendChild(div);
+  }
+}
+
+  if (d.calibration_status) {
+    const cs = d.calibration_status;
+    const banner = document.getElementById("baselineBanner");
+    const title = document.getElementById("baselineTitle");
+    const msg = document.getElementById("baselineMessage");
+
+    const trendText = {
+      stable: { title: "Staying steady", message: "Recent entries are consistent with this person's own typical baseline.", cls: "cusum-stable" },
+      moving_away: { title: "Drifting from their own baseline", message: "Recent entries are moving further from this person's usual patterns than they were before.", cls: "cusum-upper" },
+      returning_to_normal: { title: "Returning toward their baseline", message: "Recent entries are moving back closer to this person's usual patterns.", cls: "cusum-lower" },
+      insufficient_data: { title: "Still calibrating", message: "Not enough entries yet to judge whether this person is drifting from their own baseline.", cls: "cusum-both" }
+    }[d.baseline_trend] || { title: "—", message: "", cls: "cusum-stable" };
+
+    banner.className = "cusum-banner " + trendText.cls;
+    title.textContent = trendText.title;
+    msg.textContent = trendText.message;
+
+    document.getElementById("calibrationLabel").textContent = cs.calibrated
+      ? "Baseline calibrated"
+      : `Calibrating baseline: ${cs.calibration_progress} entries`;
+
+    const pct = cs.calibrated ? 100 : Math.min(100, (cs.entries_so_far / cs.entries_needed) * 100);
+    document.getElementById("calibrationFill").style.width = pct + "%";
+  }
+
+  // CUSUM status banner
+  if (d.cusum_status) {
+    const cs = d.cusum_status;
+    const bannerCls = { stable:"cusum-stable", upper_alert:"cusum-upper",
+                         lower_alert:"cusum-lower", both_alert:"cusum-both",
+                         recovered:"cusum-recovered" }[cs.current_state] || "cusum-stable";
+    const banner = document.getElementById("cusumBanner");
+    banner.className = "cusum-banner " + bannerCls;
+    document.getElementById("cusumTitle").textContent = cs.current_title;
+    document.getElementById("cusumMessage").textContent = cs.current_message;
+  }
+
+  // CUSUM chart: upper/lower cumulative sums plus a constant threshold line
+  if (d.cusum_upper?.length) {
+    const h = d.cusum_threshold || 0;
+    mkLine("cusumChart", lbl, [
+      {
+        label:"Upper CUSUM", data: d.cusum_upper,
+        borderColor:"#c0392b", backgroundColor:"rgba(192,57,43,0.06)",
+        tension:0.3, fill:false, pointRadius:2, borderWidth:1.5
+      },
+      {
+        label:"Lower CUSUM", data: d.cusum_lower,
+        borderColor:"#4a90d9", backgroundColor:"rgba(74,144,217,0.06)",
+        tension:0.3, fill:false, pointRadius:2, borderWidth:1.5
+      },
+      {
+        label:"Alert threshold (h)", data: lbl.map(()=>h),
+        borderColor:"#6b6b6b", borderDash:[5,4],
+        pointRadius:0, borderWidth:1, fill:false
+      }
+    ]);
+  }
 
   if (d.detector_scores?.length) {
-    const keys = ["mahalanobis","copula","isolation_forest","knn"];
-    const cols = ["#4a90d9","#c0392b","#27ae60","#d4a017"];
-    mkLine("detectorChart", lbl, keys.map((k,i)=>({
-      label:k.replace("_"," "), data:d.detector_scores.map(s=>s[k]||0),
-      borderColor:cols[i], tension:0.4, fill:false, pointRadius:3, borderWidth:1.5
-    })));
+    const detectors = [
+      { key: "mahalanobis",       canvas: "detectorChartMahalanobis",       color: "#4a90d9" },
+      { key: "copula",            canvas: "detectorChartCopula",            color: "#c0392b" },
+      { key: "isolation_forest",  canvas: "detectorChartIsolationForest",   color: "#27ae60" },
+      { key: "knn",               canvas: "detectorChartKnn",               color: "#d4a017" }
+    ];
+    detectors.forEach(det => {
+      const raw = d.detector_scores.map(s => s[det.key] || 0);
+      const smoothed = movingAverage(raw, 3);
+      mkLine(det.canvas, lbl, [
+        {
+          label: "raw", data: raw,
+          borderColor: det.color, backgroundColor: "transparent",
+          tension: 0.2, fill: false, pointRadius: 0, borderWidth: 1, borderDash: [2,2]
+        },
+        {
+          label: "trend", data: smoothed,
+          borderColor: det.color, backgroundColor: "transparent",
+          tension: 0.35, fill: false, pointRadius: 0, borderWidth: 2.5
+        }
+      ], 0, 1);
+    });
   }
 
   window.scrollTo({ top: document.getElementById("results").offsetTop - 20, behavior:"smooth" });
@@ -458,6 +725,12 @@ def run():
                 pass
         else:
             result = run_single_user(user_id, use_demo=True, demo_atrisk=demo_atrisk)
+
+        result["cusum_status"] = build_cusum_status(
+            result.get("cusum_alert_upper", []),
+            result.get("cusum_alert_lower", []),
+            result.get("timestamps", []),
+        )
 
         return jsonify(result)
 
