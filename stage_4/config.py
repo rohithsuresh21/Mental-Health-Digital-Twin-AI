@@ -20,6 +20,8 @@ class PipelineConfig:
         "isolation_forest": 0.15,
         "knn": 0.15
     }
+    CUSUM_K_MULTIPLIER: float = 0.5
+    CUSUM_H_MULTIPLIER: float = 5.0
 
     THRESHOLD_PERCENTILE: float = 95.0
 
@@ -36,5 +38,9 @@ class PipelineConfig:
             raise ValueError("Isolation Forest contamination rate must sit inside the interval (0.0, 0.5).")
         if cls.KNN_K <= 0:
             raise ValueError("KNN parameter k must evaluate to a positive non-zero integer matrix pointer.")
+        if cls.CUSUM_K_MULTIPLIER <= 0:
+            raise ValueError("CUSUM parameter k multiplier must evaluate to a positive non-zero float.")
+        if cls.CUSUM_H_MULTIPLIER <= 0:
+            raise ValueError("CUSUM parameter h multiplier must evaluate to a positive non-zero float.")
 
 PipelineConfig.validate()
