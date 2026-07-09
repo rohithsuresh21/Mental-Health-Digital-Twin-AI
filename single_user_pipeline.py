@@ -249,6 +249,7 @@ def run_single_user(user_id: str, file_path: Optional[str] = None,
         print(f"[Stage 5] Only {len(vecs)} entries — skipping classification, need at least 5.")
         prediction = {
         "probability": 0.0,
+        "probability_raw": 0.0,
         "risk_level": "LOW",
         "intervention_recommended": False,
         "prediction": 0,
@@ -258,6 +259,7 @@ def run_single_user(user_id: str, file_path: Optional[str] = None,
         features = pipeline.assemble_stage5_features(vecs, anomalies)
         print(f"DEBUG: n_entries={len(records)}, vecs={len(vecs)}, features_shape={features.shape}")
         prediction = pipeline.predict_classification(features)
+        print(f"DEBUG: probability_raw={prediction.get('probability_raw')}, probability_calibrated={prediction.get('probability')}")
 
     ub = pipeline.user_baselines[user_id]
     calibration_status = ub.calibration_status()
