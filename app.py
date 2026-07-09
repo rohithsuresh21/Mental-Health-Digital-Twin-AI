@@ -5,17 +5,6 @@ from flask import Flask, request, jsonify, render_template_string
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 32 * 1024 * 1024
 
-# ---------------------------------------------------------------------------
-# CUSUM state classification
-#
-# Four states, driven by the upper/lower CUSUM alert flags produced by
-# CUSUMDetector.update_score() (see cusum.py):
-#   1 = stable        -> upper below h AND lower below h
-#   2 = upper_alert    -> upper crossed h, lower did not (drifting above baseline)
-#   3 = lower_alert    -> lower crossed h, upper did not (drifting below baseline)
-#   4 = both_alert     -> both crossed h (oscillation)
-# ---------------------------------------------------------------------------
-
 CUSUM_STATUS_TEXT = {
     1: {
         "state": "stable",
@@ -324,6 +313,78 @@ HTML = r"""<!DOCTYPE html>
     transition: width .3s;
   }
 
+  .score-badge {
+    display: inline-block;
+    font-size: 12px;
+    font-weight: 500;
+    padding: 3px 10px;
+    border-radius: 4px;
+    border: 1px solid;
+    white-space: nowrap;
+  }
+
+  .scale-legend { margin-top: 18px; }
+  .scale-bar {
+    display: flex;
+    border-radius: 4px;
+    overflow: hidden;
+    height: 10px;
+  }
+  .scale-bar div { flex: 1; }
+  .scale-labels {
+    display: flex;
+    justify-content: space-between;
+    font-size: 10px;
+    color: var(--dim);
+    margin-top: 6px;
+  }
+
+  details.section { margin-bottom: 24px; }
+  details.section > summary {
+    list-style: none;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 4px 0;
+  }
+  details.section > summary::-webkit-details-marker { display: none; }
+  details.section > summary::after {
+    content: "+";
+    color: var(--dim);
+    font-size: 16px;
+    margin-left: 12px;
+  }
+  details.section[open] > summary::after { content: "\2212"; }
+  details.section > summary .section-label { margin-bottom: 0; }
+  details.section .section-body { margin-top: 20px; }
+
+  .detector-card {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin-bottom: 14px;
+  }
+  .detector-card summary {
+    list-style: none;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px;
+  }
+  .detector-card summary::-webkit-details-marker { display: none; }
+  .detector-card summary::after {
+    content: "+";
+    color: var(--dim);
+    font-size: 16px;
+    margin-left: 12px;
+  }
+  .detector-card[open] summary::after { content: "\2212"; }
+  .detector-card .det-name { font-size: 13px; color: var(--accent); font-weight: 500; }
+  .detector-card .det-summary { font-size: 11.5px; color: var(--dim); margin-top: 3px; }
+  .detector-card .det-body { padding: 0 20px 20px; border-top: 1px solid var(--border); }
+  .axis-caption { font-size: 11px; color: var(--dim); margin-top: 8px; line-height: 1.6; }
+
   @media (max-width: 600px) {
     .chart-grid { grid-template-columns: 1fr; }
     .risk-block { flex-direction: column; gap: 24px; }
@@ -375,87 +436,109 @@ HTML = r"""<!DOCTYPE html>
         <div class="risk-stats" id="riskStats"></div>
       </div>
       <div class="note" id="interventionNote"></div>
+
+      <div class="scale-legend">
+        <div class="chart-label" style="margin-bottom:8px;">
+          What the scores on this page mean, from 0 (calmest) to 1 (most concerning)
+        </div>
+        <div class="scale-bar">
+          <div style="background:#27ae60;"></div>
+          <div style="background:#4bbf73;"></div>
+          <div style="background:#4a90d9;"></div>
+          <div style="background:#d4a017;"></div>
+          <div style="background:#e08b2f;"></div>
+          <div style="background:#d9534f;"></div>
+          <div style="background:#c0392b;"></div>
+        </div>
+        <div class="scale-labels">
+          <span>Excellent</span><span>Healthy</span><span>Stable</span>
+          <span>Slight concern</span><span>Moderate</span><span>High</span><span>Critical</span>
+        </div>
+      </div>
     </div>
 
     <hr class="divider">
 
-    <div class="section">
-      <div class="section-label">Mood and risk over the last two weeks</div>
-      <div class="chart-grid">
-        <div class="chart-wrap">
-          <div class="chart-label">How your tone has shifted day to day</div>
-          <canvas id="sentimentChart"></canvas>
-        </div>
-        <div class="chart-wrap">
-          <div class="chart-label">Moments that stood out as unusual</div>
-          <canvas id="anomalyChart"></canvas>
-        </div>
-      </div>
-    </div>
-
-    <hr class="divider">
-
-    <div class="section">
-      <div class="section-label">Your personal baseline</div>
-      <div class="cusum-banner" id="baselineBanner">
-        <div class="dot"></div>
-        <div class="body">
-          <div class="title" id="baselineTitle">—</div>
-          <div class="msg" id="baselineMessage"></div>
+    <details class="section" open>
+      <summary><div class="section-label">Mood and risk over time</div></summary>
+      <div class="section-body">
+        <div class="chart-grid">
+          <div class="chart-wrap">
+            <div class="chart-label">How your tone has shifted day to day</div>
+            <canvas id="sentimentChart"></canvas>
+            <div class="axis-caption">Each point is one journal entry, in order by date (X-axis). The Y-axis is the sentiment of that entry's writing, from -1 (very negative tone) to +1 (very positive tone), with 0 being neutral.</div>
+          </div>
+          <div class="chart-wrap">
+            <div class="chart-label">Moments that stood out as unusual</div>
+            <canvas id="anomalyChart"></canvas>
+            <div class="axis-caption">Each point is one journal entry, in order by date (X-axis). The Y-axis is how unusual that entry looked compared to this person's own typical pattern, from 0 (completely typical) to 1 (very unusual).</div>
+          </div>
         </div>
       </div>
-      <div class="chart-label" id="calibrationLabel" style="margin-bottom:6px;"></div>
-      <div class="progress-bar"><div class="progress-fill" id="calibrationFill" style="width:0%;"></div></div>
-    </div>
+    </details>
 
-    <hr class="divider">
+    <details class="section">
+      <summary><div class="section-label">Your personal baseline</div></summary>
+      <div class="section-body">
+        <div class="chart-label" style="margin-bottom:10px;">
+          This shows how well the system has learned what's "normal" for this specific person, and whether recent entries are drifting away from that.
+        </div>
+        <div class="cusum-banner" id="baselineBanner">
+          <div class="dot"></div>
+          <div class="body">
+            <div class="title" id="baselineTitle">—</div>
+            <div class="msg" id="baselineMessage"></div>
+          </div>
+        </div>
+        <div class="chart-label" id="calibrationLabel" style="margin-bottom:6px;"></div>
+        <div class="progress-bar"><div class="progress-fill" id="calibrationFill" style="width:0%;"></div></div>
+      </div>
+    </details>
 
-    <div class="section">
-      <div class="section-label">Trend stability (CUSUM)</div>
-      <div class="cusum-banner" id="cusumBanner">
-        <div class="dot"></div>
-        <div class="body">
-          <div class="title" id="cusumTitle">—</div>
-          <div class="msg" id="cusumMessage"></div>
+    <details class="section">
+      <summary><div class="section-label">Trend stability (CUSUM)</div></summary>
+      <div class="section-body">
+        <div class="cusum-banner" id="cusumBanner">
+          <div class="dot"></div>
+          <div class="body">
+            <div class="title" id="cusumTitle">—</div>
+            <div class="msg" id="cusumMessage"></div>
+          </div>
         </div>
+        <div class="chart-label" style="margin-bottom:14px;">
+          A running tally of how far this person's readings have drifted above (red) or below (blue) their own baseline, added up over time rather than looked at one entry at a time. This makes it easier to tell a real sustained shift apart from one noisy day.
+        </div>
+        <canvas id="cusumChart" style="max-height:220px;"></canvas>
+        <div class="axis-caption">X-axis: date of each entry. Y-axis: cumulative drift score — the dashed line is the alert threshold. Crossing it means the drift has been sustained, not just a single unusual entry.</div>
       </div>
-      <div class="chart-label" style="margin-bottom:14px;">
-        Cumulative drift above (upper) and below (lower) your baseline. A dashed line marks the alert threshold — crossing it signals a sustained shift, not just a single noisy entry.
-      </div>
-      <canvas id="cusumChart" style="max-height:220px;"></canvas>
-    </div>
+    </details>
 
-    <hr class="divider">
+    <details class="section">
+      <summary><div class="section-label">What's driving that signal</div></summary>
+      <div class="section-body">
+        <div class="chart-label" style="margin-bottom:14px;">
+          These four methods each define "unusual" differently, so they can disagree — that's expected, not a bug. The number to actually trust is the "Moments that stood out as unusual" chart above, which already combines all four. What's below explains why that combined number looks the way it does, not four separate verdicts to choose between.
+        </div>
+        <div id="detectorConsensus" class="note" style="margin-top:0;margin-bottom:20px;"></div>
+        <div id="detectorCards"></div>
+      </div>
+    </details>
 
-    <div class="section">
-      <div class="section-label">What's driving that signal</div>
-      <div class="chart-label" style="margin-bottom:14px;">
-        Four different ways of looking for unusual patterns, shown separately so each one is easy to read on its own. When they agree, that's a stronger signal.
+    <details class="section">
+      <summary><div class="section-label">Technical details</div></summary>
+      <div class="section-body">
+        <div class="chart-label" style="margin-bottom:10px;">
+          For debugging and transparency: the risk model used here is a pretrained clinical model, not one trained on this specific dataset. The raw model output and the calibrated (adjusted) probability are shown separately below so any mismatch is visible rather than hidden.
+        </div>
+        <div id="technicalDetails" style="font-size:12px;color:var(--dim);line-height:2;"></div>
       </div>
-      <div class="chart-grid">
-        <div class="chart-wrap">
-          <div class="chart-label">Mahalanobis</div>
-          <canvas id="detectorChartMahalanobis"></canvas>
-        </div>
-        <div class="chart-wrap">
-          <div class="chart-label">Copula</div>
-          <canvas id="detectorChartCopula"></canvas>
-        </div>
-        <div class="chart-wrap">
-          <div class="chart-label">Isolation forest</div>
-          <canvas id="detectorChartIsolationForest"></canvas>
-        </div>
-        <div class="chart-wrap">
-          <div class="chart-label">KNN</div>
-          <canvas id="detectorChartKnn"></canvas>
-        </div>
-      </div>
-    </div>
+    </details>
 
   </div>
 </div>
 
 <script>
+
 let charts = {};
 
 function setStatus(msg, loading=false) {
@@ -536,14 +619,29 @@ function movingAverage(arr, window=3) {
   });
 }
 
+function scoreBand(v) {
+  if (v < 0.15) return { label: "Excellent", color: "#27ae60" };
+  if (v < 0.30) return { label: "Healthy", color: "#4bbf73" };
+  if (v < 0.45) return { label: "Stable", color: "#4a90d9" };
+  if (v < 0.60) return { label: "Slight Concern", color: "#d4a017" };
+  if (v < 0.75) return { label: "Moderate Risk", color: "#e08b2f" };
+  if (v < 0.90) return { label: "High Risk", color: "#d9534f" };
+  return { label: "Critical", color: "#c0392b" };
+}
+
+function scoreBadgeHTML(v) {
+  const b = scoreBand(v);
+  return `<span class="score-badge" style="background:${b.color}22;color:${b.color};border-color:${b.color}66;">${b.label} &middot; ${(v*100).toFixed(0)}%</span>`;
+}
+
 function renderResults(d) {
   document.getElementById("results").style.display = "block";
   const p = d.prediction;
+  const dense = d.n_entries > 60;
 
-  // Risk level
   const cls = { LOW:"col-low", MODERATE:"col-moderate", HIGH:"col-high" }[p.risk_level] || "";
   document.getElementById("riskLevel").className = "level " + cls;
-  document.getElementById("riskLevel").textContent = p.risk_level;
+  document.getElementById("riskLevel").innerHTML = scoreBadgeHTML(p.probability);
 
   document.getElementById("riskStats").innerHTML = `
     <div class="stat"><div class="val col-blue">${(p.probability*100).toFixed(1)}%</div><div class="lbl">estimated risk</div></div>
@@ -561,28 +659,34 @@ function renderResults(d) {
   }
 
   const lbl = d.timestamps;
+  const pr = dense ? 0 : 3;
+  const bw = dense ? 1 : 1.5;
 
   mkLine("sentimentChart", lbl, [{
     label:"Sentiment", data: d.sentiment_series,
     borderColor:"#4a90d9", backgroundColor:"rgba(74,144,217,0.06)",
-    tension:0.4, fill:true, pointRadius:3, borderWidth:1.5
+    tension:0.3, fill:true, pointRadius:pr, borderWidth:bw
   }], -1, 1);
 
   mkLine("anomalyChart", lbl, [{
     label:"Anomaly Risk", data: d.anomaly_scores,
     borderColor:"#c0392b", backgroundColor:"rgba(192,57,43,0.06)",
-    tension:0.4, fill:true, pointRadius:3, borderWidth:1.5
+    tension:0.3, fill:true, pointRadius:pr, borderWidth:bw
   }], 0, 1);
-  
+
+  const oldNote = document.getElementById("persistentNote");
+  if (oldNote) oldNote.remove();
   if (d.persistent_anomaly_flags?.length) {
     const persistentDates = d.timestamps.filter((_, i) => d.persistent_anomaly_flags[i]);
-  if (persistentDates.length > 0) {
-    const div = document.createElement("div");
-    div.style.cssText = "margin-top:8px;font-size:11px;color:#c0392b;";
-    div.textContent = "⚠ Persistent signal on: " + persistentDates.join(", ");
-    document.getElementById("anomalyChart").parentNode.appendChild(div);
+    if (persistentDates.length > 0) {
+      const div = document.createElement("div");
+      div.id = "persistentNote";
+      div.style.cssText = "margin-top:8px;font-size:11px;color:#c0392b;";
+      const shown = persistentDates.length > 6 ? persistentDates.slice(0,6).join(", ") + ` and ${persistentDates.length-6} more` : persistentDates.join(", ");
+      div.textContent = "Persistent signal on: " + shown;
+      document.getElementById("anomalyChart").parentNode.appendChild(div);
+    }
   }
-}
 
   if (d.calibration_status) {
     const cs = d.calibration_status;
@@ -609,7 +713,6 @@ function renderResults(d) {
     document.getElementById("calibrationFill").style.width = pct + "%";
   }
 
-  // CUSUM status banner
   if (d.cusum_status) {
     const cs = d.cusum_status;
     const bannerCls = { stable:"cusum-stable", upper_alert:"cusum-upper",
@@ -621,19 +724,18 @@ function renderResults(d) {
     document.getElementById("cusumMessage").textContent = cs.current_message;
   }
 
-  // CUSUM chart: upper/lower cumulative sums plus a constant threshold line
   if (d.cusum_upper?.length) {
     const h = d.cusum_threshold || 0;
     mkLine("cusumChart", lbl, [
       {
         label:"Upper CUSUM", data: d.cusum_upper,
         borderColor:"#c0392b", backgroundColor:"rgba(192,57,43,0.06)",
-        tension:0.3, fill:false, pointRadius:2, borderWidth:1.5
+        tension:0.25, fill:false, pointRadius:pr, borderWidth:bw
       },
       {
         label:"Lower CUSUM", data: d.cusum_lower,
         borderColor:"#4a90d9", backgroundColor:"rgba(74,144,217,0.06)",
-        tension:0.3, fill:false, pointRadius:2, borderWidth:1.5
+        tension:0.25, fill:false, pointRadius:pr, borderWidth:bw
       },
       {
         label:"Alert threshold (h)", data: lbl.map(()=>h),
@@ -645,14 +747,58 @@ function renderResults(d) {
 
   if (d.detector_scores?.length) {
     const detectors = [
-      { key: "mahalanobis",       canvas: "detectorChartMahalanobis",       color: "#4a90d9" },
-      { key: "copula",            canvas: "detectorChartCopula",            color: "#c0392b" },
-      { key: "isolation_forest",  canvas: "detectorChartIsolationForest",   color: "#27ae60" },
-      { key: "knn",               canvas: "detectorChartKnn",               color: "#d4a017" }
+      { key: "mahalanobis",      canvas: "detectorChartMahalanobis",      color: "#4a90d9",
+        name: "Mahalanobis distance", blurb: "Flags entries that sit far from this person's usual pattern across all features at once." },
+      { key: "copula",           canvas: "detectorChartCopula",           color: "#c0392b",
+        name: "Copula", blurb: "Looks at how features relate to each other and flags when those relationships break down." },
+      { key: "isolation_forest", canvas: "detectorChartIsolationForest",  color: "#27ae60",
+        name: "Isolation forest", blurb: "Flags entries that are easy to separate from the rest — the outliers that stand apart." },
+      { key: "knn",              canvas: "detectorChartKnn",              color: "#d4a017",
+        name: "K-nearest neighbors", blurb: "Flags entries that don't have many similar-looking entries nearby." }
     ];
+
+    const latestVals = detectors.map(det => (d.detector_scores[d.detector_scores.length-1] || {})[det.key] || 0);
+    const elevatedCount = latestVals.filter(v => v >= 0.6).length;
+    const consensusEl = document.getElementById("detectorConsensus");
+    if (elevatedCount >= 3) {
+      consensusEl.className = "note warn";
+      consensusEl.textContent = `${elevatedCount} of 4 methods currently read this as elevated — that agreement is why the combined signal is high.`;
+    } else if (elevatedCount === 0) {
+      consensusEl.className = "note ok";
+      consensusEl.textContent = "All 4 methods currently read this as typical — no single one is flagging anything unusual right now.";
+    } else {
+      consensusEl.className = "note";
+      consensusEl.textContent = `${elevatedCount} of 4 methods currently read this as elevated, the rest read it as typical — this kind of partial disagreement is normal and means the entry is unusual in one specific way, not across the board.`;
+    }
+
+    const container = document.getElementById("detectorCards");
+    container.innerHTML = detectors.map(det => `
+      <details class="detector-card">
+        <summary>
+          <div>
+            <div class="det-name">${det.name}</div>
+            <div class="det-summary" id="detSummary_${det.key}">Loading…</div>
+          </div>
+          <div id="detBadge_${det.key}"></div>
+        </summary>
+        <div class="det-body">
+          <div class="chart-label" style="margin:14px 0 10px;">${det.blurb}</div>
+          <canvas id="${det.canvas}"></canvas>
+          <div class="axis-caption">X-axis: date of each entry. Y-axis: this detector's own unusualness score, 0 to 1. Dashed line is the raw day-to-day score; solid line is a smoothed 3-entry trend.</div>
+        </div>
+      </details>
+    `).join("");
+
     detectors.forEach(det => {
       const raw = d.detector_scores.map(s => s[det.key] || 0);
       const smoothed = movingAverage(raw, 3);
+      const latest = raw[raw.length - 1] || 0;
+
+      document.getElementById(`detBadge_${det.key}`).innerHTML = scoreBadgeHTML(latest);
+      const band = scoreBand(latest);
+      document.getElementById(`detSummary_${det.key}`).textContent =
+        `Latest reading: ${band.label.toLowerCase()} (${(latest*100).toFixed(0)}%)`;
+
       mkLine(det.canvas, lbl, [
         {
           label: "raw", data: raw,
@@ -668,16 +814,25 @@ function renderResults(d) {
     });
   }
 
+  const rawP = (p.probability_raw !== undefined && p.probability_raw !== null) ? p.probability_raw : p.probability;
+  const gap = Math.abs(rawP - p.probability);
+  document.getElementById("technicalDetails").innerHTML = `
+    <div>Raw model output (before calibration): <strong>${(rawP*100).toFixed(1)}%</strong></div>
+    <div>Calibrated probability (shown above): <strong>${(p.probability*100).toFixed(1)}%</strong></div>
+    <div>Entries used for this run: <strong>${d.n_entries}</strong></div>
+    <div style="margin-top:10px;">${gap > 0.15
+      ? "The raw and calibrated values differ noticeably here, which means the calibration step is doing real work adjusting the model's output for this input."
+      : "The raw and calibrated values are close for this run. If this number looks very similar across very different datasets, the underlying model itself may be saturating rather than the calibration step being the cause — worth comparing raw values across runs, not just calibrated ones."}</div>
+  `;
+
   window.scrollTo({ top: document.getElementById("results").offsetTop - 20, behavior:"smooth" });
 }
 
-// File input
 document.getElementById("fileInput").addEventListener("change", e => {
   const f = e.target.files[0];
   if (f) document.getElementById("dropLabel").innerHTML = `<strong>${f.name}</strong>`;
 });
 
-// Drag and drop
 const dz = document.getElementById("dropZone");
 dz.addEventListener("dragover", e => { e.preventDefault(); dz.style.borderColor="#555"; });
 dz.addEventListener("dragleave", () => dz.style.borderColor="");
