@@ -49,7 +49,6 @@ class UnifiedJournalPipeline:
         self._user_id_mapping = {}
         self.cusum_detectors = {}
 
-        # Load pretrained DAIC-WOZ model on startup
         self._load_daic_model()
         
         print("Pipeline initialized")
@@ -430,8 +429,11 @@ class UnifiedJournalPipeline:
     def assemble_stage5_features(
         self,
         window_vectors: List[np.ndarray],
-        anomaly_scores: Optional[List[Dict[str, Any]]] = None
+        anomaly_scores: Optional[List[Dict[str, Any]]] = None,
+        recent_window: int = 30,
+        delta_window: int = 3
     ) -> np.ndarray:
+        window_vectors = window_vectors[-recent_window:]
         window = np.array(window_vectors)
 
         if window.shape[0] == 0:
@@ -444,7 +446,6 @@ class UnifiedJournalPipeline:
             stats = stat_func(window, axis=0)
             features.extend(stats)
 
-        delta_window = max(3, window.shape[0] // 5)
         if window.shape[0] >= delta_window * 2:
             early_mean = np.nanmean(window[:delta_window], axis=0)
             late_mean  = np.nanmean(window[-delta_window:], axis=0)
@@ -581,7 +582,7 @@ class UnifiedJournalPipeline:
     def predict_classification(
         self,
         feature_vec: np.ndarray,
-        calibration: str = "isotonic"
+        calibration: str = "platt"
     ) -> Dict[str, Any]:
         if self.xgb_model is None:
             raise ValueError("XGBoost model not trained. Call train_xgboost_classifier first.")
