@@ -14,7 +14,10 @@ class MultiDetectorPipeline:
         self.sanitizer = NativeFeatureSanitizer()
         self.threshold_engine = StaticPercentileEngine(target_percentile = PipelineConfig.THRESHOLD_PERCENTILE)
 
-        self.mahalanobis = ProductionMahalanobisDetector(regularization = PipelineConfig.MAHALANOBIS_REGULARIZATION)
+        self.mahalanobis = ProductionMahalanobisDetector(
+            regularization = PipelineConfig.MAHALANOBIS_REGULARIZATION,
+            exclude_dims = list(range(444, 466))
+        )
         self.isolation_forest = ProductionIsolationForestDetector(
             n_estimators = PipelineConfig.IFOREST_N_ESTIMATORS,
             contamination = PipelineConfig.IFOREST_CONTAMINATION,
@@ -43,7 +46,7 @@ class MultiDetectorPipeline:
 
         self.is_fitted = True
         return self
-    
+
     def predict_scores(self, X: np.ndarray) -> Dict[str, List[float]]:
         X_clean = self.sanitizer.transform(X)
         return {
@@ -52,7 +55,7 @@ class MultiDetectorPipeline:
             "isolation_forest": self.isolation_forest.predict_score(X_clean).tolist(),
             "knn": self.knn.predict_score(X_clean).tolist()
         }
-    
+
     def predict(self, X: np.ndarray) -> Dict[str, Any]:
         scores_dict = self.predict_scores(X)
 
@@ -69,11 +72,11 @@ class MultiDetectorPipeline:
             if_s = scores_dict["isolation_forest"][i]
             k_s = scores_dict["knn"][i]
 
-            risk = (m_s * w["mahalanobis"] + 
-                    c_s * w["copula"] + 
-                    if_s * w["isolation_forest"] + 
+            risk = (m_s * w["mahalanobis"] +
+                    c_s * w["copula"] +
+                    if_s * w["isolation_forest"] +
                     k_s * w["knn"])
-            
+
             overall_risk_scores.append(risk)
 
             m_anom = self.threshold_engine.eval_status("mahalanobis", m_s)
@@ -95,7 +98,7 @@ class MultiDetectorPipeline:
                 "overall_risk_score": overall_risk_scores,
                 "is_anomaly": is_anomaly_flags
             }
-        
+
     def save(self, filepath: str) -> None:
             with open(filepath, "wb") as output_stream:
                 pickle.dump(self, output_stream)
@@ -103,5 +106,4 @@ class MultiDetectorPipeline:
     @staticmethod
     def load(filepath: str) -> "MultiDetectorPipeline"        :
             with open(filepath, "rb") as input_stream:
-                return pickle.load(input_stream)       
-
+                return pickle.load(input_stream)
