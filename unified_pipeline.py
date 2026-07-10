@@ -34,6 +34,7 @@ class UnifiedJournalPipeline:
         self.user_baselines = {}
         self.temporal_binner = TemporalBinning()
         self.calibration_flags = {}
+        self.raw_feature_vectors = {}
 
         self.tft_model = None
         self.anomaly_detector = None
@@ -165,9 +166,12 @@ class UnifiedJournalPipeline:
                 self.normalized_vectors[user_id] = []
             if user_id not in self.calibration_flags:
                 self.calibration_flags[user_id] = []
+            if user_id not in self.raw_feature_vectors:
+                self.raw_feature_vectors[user_id] = []
 
             self.normalized_vectors[user_id].append(z_scored_vec)
             self.calibration_flags[user_id].append(was_calibrated)
+            self.raw_feature_vectors[user_id].append(feature_vec.copy())
 
             print(f"Stage 2 complete for user {user_id}: normalized features")
 
@@ -182,6 +186,20 @@ class UnifiedJournalPipeline:
         except Exception as e:
             print(f"Stage 2 error for user {user_id}: {str(e)}")
             raise
+
+    def get_batch_consistent_vectors(self, user_id: str) -> list:
+        if user_id not in self.raw_feature_vectors:
+            return self.normalized_vectors.get(user_id, [])
+
+        baseline = self.user_baselines.get(user_id)
+        if baseline is None or not baseline.calibrated:
+            return self.normalized_vectors.get(user_id, [])
+
+        consistent_vectors = []
+        for raw_vec in self.raw_feature_vectors[user_id]:
+            scored = baseline.normalise(raw_vec)
+            consistent_vectors.append(scored if scored is not None else raw_vec)
+        return consistent_vectors
 
     def train_tft_model(
         self,
@@ -275,7 +293,8 @@ class UnifiedJournalPipeline:
                 return
 
             all_vectors = []
-            for user_id, vectors in self.normalized_vectors.items():
+            for user_id in self.normalized_vectors:
+                vectors = self.get_batch_consistent_vectors(user_id)
                 flags = self.calibration_flags.get(user_id, [True] * len(vectors))
                 calibrated_vectors = [v for v, f in zip(vectors, flags) if f]
                 if calibrated_vectors:
