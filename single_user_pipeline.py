@@ -221,6 +221,9 @@ def run_single_user(user_id: str, file_path: Optional[str] = None,
     detectors_file = model_dir / "stage4_detectors.pkl"
     threshold_file = model_dir / "stage4_threshold_engine.pkl"
 
+    all_vecs = pipeline.get_batch_consistent_vectors(user_id)
+    n_total = len(all_vecs)
+
     if detectors_file.exists() and threshold_file.exists():
         print(f"Stage 4: Loading pretrained calibration models from {model_dir}...")
         import pickle
@@ -229,11 +232,22 @@ def run_single_user(user_id: str, file_path: Optional[str] = None,
         with open(threshold_file, "rb") as f:
             pipeline.threshold_engine = pickle.load(f)
     else:
-        print("Stage 4: Pretrained models missing – falling back to dynamic context initialization...")
-        pipeline.train_anomaly_detector(use_latent_features=False)
+        print("Stage 4: Pretrained models missing – training fresh with chronological split...")
+        n_train = max(10, int(n_total * 0.7))
+        train_vecs = all_vecs[:n_train]
+        X_train = np.array(train_vecs)
+        print(f"  Training on first {n_train}/{n_total} entries, scoring all {n_total}")
+
+        from stage_4.anomaly_pipeline import MultiDetectorPipeline
+        pipeline.anomaly_detector = MultiDetectorPipeline()
+        pipeline.anomaly_detector.fit(X_train)
+
+        import pickle as _pkl
+        detector_path = os.path.join(pipeline.output_dir, "anomaly_detector.pkl")
+        pipeline.anomaly_detector.save(detector_path)
 
     anomaly_results = []
-    for vec in pipeline.normalized_vectors[user_id]:
+    for vec in all_vecs:
         anomaly_results.append(pipeline.detect_anomalies(vec))
 
     pipeline.anomaly_scores[user_id] = anomaly_results
