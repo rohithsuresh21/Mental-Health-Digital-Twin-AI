@@ -1,7 +1,7 @@
 import numpy as np
 from typing import Dict, Any, Union, Optional, List
 from scipy.linalg import pinvh
-from scipy.stats import chi2
+from sklearn.covariance import LedoitWolf
 
 class ProductionMahalanobisDetector:
 
@@ -13,6 +13,7 @@ class ProductionMahalanobisDetector:
         self.mean: np.ndarray = np.array([])
         self.pseudo_inverse: np.ndarray = np.array([])
         self.dof: int = 0
+        self.train_distances_: np.ndarray = np.array([])
         self.is_fitted: bool = False
 
     def _select(self, X: np.ndarray) -> np.ndarray:
@@ -26,7 +27,15 @@ class ProductionMahalanobisDetector:
         X_arr = self._select(X_arr)
         self.mean = np.mean(X_arr, axis=0)
 
-        cov = np.cov(X_arr, rowvar=False)
+        n_samples, n_features = X_arr.shape
+
+        if n_samples <= n_features:
+            estimator = LedoitWolf()
+            estimator.fit(X_arr)
+            cov = estimator.covariance_
+        else:
+            cov = np.cov(X_arr, rowvar=False)
+
         if X_arr.shape[0] == 1:
             cov = np.array([[cov]])
         if cov.ndim == 0:
@@ -38,6 +47,8 @@ class ProductionMahalanobisDetector:
 
         self.pseudo_inverse = pinvh(cov_reg)
         self.dof = cov.shape[0]
+
+        self.train_distances_ = np.sort(self._compute_raw_distances(X_arr))
 
         self.is_fitted = True
         return self
@@ -54,6 +65,7 @@ class ProductionMahalanobisDetector:
         X_arr = self._select(X_arr)
         raw_distances = self._compute_raw_distances(X_arr)
 
-        squared_distances = raw_distances ** 2
-        normalized_scores = chi2.cdf(squared_distances, df=self.dof)
+        n_train = len(self.train_distances_)
+        ranks = np.searchsorted(self.train_distances_, raw_distances, side="right")
+        normalized_scores = ranks / n_train
         return np.clip(normalized_scores, 0.0, 1.0)
