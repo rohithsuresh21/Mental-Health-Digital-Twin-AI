@@ -3,13 +3,15 @@ import numpy as np
 import pickle
 import xgboost as xgb
 from sklearn.metrics import roc_auc_score
-from sklearn.isotonic import IsotonicRegression
+# from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
 from sklearn.calibration import calibration_curve
 import matplotlib.pyplot as plt
 from scipy.special import expit
 from sklearn.metrics import f1_score
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
 
 # Loading the dataset
 X = np.load("X_train.npy")
@@ -42,6 +44,20 @@ y_train = y[train_mask]
 X_val = X[val_mask]
 y_val = y[val_mask]
 
+# Standard Scaler
+scaler = StandardScaler()
+X_train = scaler.fit_transform(X_train)
+X_val = scaler.transform(X_val)
+
+pca = PCA(
+    n_components=0.95,
+    random_state=42
+)
+
+X_train = pca.fit_transform(X_train)
+X_val = pca.transform(X_val)
+print(f"PCA reduced features from {X.shape[1]} to {X_train.shape[1]}")
+
 print(f"Train participants: {len(train_uids)}")
 print(f"Validation participants: {len(val_uids)}")
 print(f"Train windows: {len(X_train)}")
@@ -58,6 +74,7 @@ model = xgb.XGBClassifier(
     gamma = 0.5,
     reg_alpha = 1.0,
     reg_lambda = 3.0,
+    min_child_weight = 5,
     scale_pos_weight = pos_weight,
     objective = "binary:logistic",
     eval_metric = "auc",
@@ -131,13 +148,36 @@ ece_raw = compute_ece(y_val, val_probs)
 print(f"ECE brfore calibration: {ece_raw:.4f}")
 
 # Isotonic regression calibration
-iso = IsotonicRegression(out_of_bounds="clip")
-iso.fit(val_probs, y_val)
-cal_iso = iso.predict(val_probs)
-ece_iso = compute_ece(y_val, cal_iso)
-auroc_iso = roc_auc_score(y_val, cal_iso)
-print(f"AUROC after isotonic: {auroc_iso:.4f}")
-print(f"ECE after isotonic: {ece_iso:.4f}")
+# iso = IsotonicRegression(out_of_bounds="clip")
+# iso.fit(val_probs, y_val)
+# cal_iso = iso.predict(val_probs)
+# ece_iso = compute_ece(y_val, cal_iso)
+# auroc_iso = roc_auc_score(y_val, cal_iso)
+# print(f"AUROC after isotonic: {auroc_iso:.4f}")
+# print(f"ECE after isotonic: {ece_iso:.4f}")
+
+# Temperature scaling
+def temperature_scale(probs, T):
+    # Convert prob to logit, divide by T, convert back
+    logits = np.log(probs / (1 - probs + 1e-7) + 1e-7)
+    scaled_logits = logits / T
+    return 1 / (1 + np.exp(-scaled_logits))
+
+# Grid search T in [0.5, 2.0]
+best_T = 1.0
+best_ece = float('inf')
+for T in np.arange(0.5, 2.0, 0.1):
+    cal = temperature_scale(val_probs, T)
+    ece = compute_ece(y_val, cal)
+    if ece < best_ece:
+        best_ece = ece
+        best_T = T
+
+cal_temp = temperature_scale(val_probs, best_T)
+ece_temp = compute_ece(y_val, cal_temp)
+print(f"Best T: {best_T:.2f}")
+print(f"ECE after temperature scaling: {ece_temp:.4f}")
+
 
 # Platt scaling calibration
 eps = 1e-7
@@ -156,8 +196,8 @@ print(f"A={A:.4f}, B={B:.4f}")
 #Reliability diagram
 fig, axes = plt.subplots(1, 3, figsize=(15,5))
 
-prob_arrays = [val_probs, cal_iso, cal_platt]
-titles = ["Raw", "Isotonic", "Platt"]
+prob_arrays = [val_probs, cal_temp, cal_platt]
+titles = ["Raw", "Temperature", "Platt"]
 
 for probs,title,ax in zip(prob_arrays, titles, axes):
     # Calibration curve
@@ -184,7 +224,7 @@ print(f"  Val samples:          {len(X_val)}")
 print(f"  Validation AUROC:     {auroc:.4f}")
 print(f"  F1 score:             {f1:.4f}")
 print(f"  ECE raw:              {ece_raw:.4f}")
-print(f"  ECE isotonic:         {ece_iso:.4f}")
+print(f"  ECE temperature:         {ece_temp:.4f}")
 print(f"  ECE Platt:            {ece_platt:.4f}")
 print(f"  pos_weight used:      {pos_weight:.2f}")
 print("="*50)
@@ -192,13 +232,25 @@ print("="*50)
 # Save
 model.save_model("model.json")
 
-with open("isotonic.pkl", "wb") as f:
-    pickle.dump(iso, f)
+with open("temperature.json", "w") as f:
+    json.dump({"T": best_T}, f)
+print(f"temperature.json saved — T={best_T:.2f}")
 
 with open("platt.pkl", "wb") as f:
     pickle.dump({"A": A,"B":B}, f)
+
+with open("pca.pkl", "wb") as f:
+    pickle.dump(
+        {
+            "scaler": scaler,
+            "pca": pca
+        },
+        f
+    )
+
+print("pca.pkl saved")
 print("model.json saved")
-print("isotonic.pkl saved")
+print("temperature.json saved")
 print("platt.pkl saved")
 
 
