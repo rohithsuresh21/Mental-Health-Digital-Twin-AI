@@ -167,7 +167,7 @@ Soft voting aggregation with equal weights
 - **Model**: XGBoost classifier
 - **Training**: DAIC dataset (depressed vs. control)
 - **Output**: Risk level (LOW/MODERATE/HIGH) + probability distribution
-- **Calibration**: Isotonic regression for probability estimates
+- **Calibration**: Platt & Temperature Scaling
 
 ---
 ## Output Format
