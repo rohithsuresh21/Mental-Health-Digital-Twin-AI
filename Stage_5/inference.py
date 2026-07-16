@@ -9,11 +9,10 @@ _T = None
 _platt_A = None
 _platt_B = None
 _names = None
-_pca = None
-_scaler = None
+
 
 def _load():
-    global _model, _T,_platt_A , _platt_B, _names, _pca, _scaler
+    global _model, _T,_platt_A , _platt_B, _names
     _model = xgb.XGBClassifier()
     _model.load_model("model.json")
 
@@ -25,25 +24,17 @@ def _load():
         _platt_A = d["A"]
         _platt_B = d["B"]
 
-    with open("pca.pkl", "rb") as f:
-        d = pickle.load(f)
-        _pca = d["pca"]
-        _scaler = d["scaler"]
-
     with open("feature_names.json") as f:
         _names = json.load(f)
 
-def predict(X, calibration="temperature"):
-    global _platt_A, _platt_B, _T, _names, _model, _scaler, _pca # or platt
+def predict(X, calibration="platt"):
+    global _platt_A, _platt_B, _T, _names, _model # or platt
     if _model is None:
         _load()
 
     if X.ndim == 1:
         X = np.reshape(X,(1, -1)) # -1 figures out the dimension of the input auto
     
-    X = _scaler.transform(X)
-    X = _pca.transform(X)
-
     p_raw = float(_model.predict_proba(X)[0, 1])
 
     if calibration == "temperature":
@@ -89,7 +80,7 @@ def get_model_for_shap():
     return _model
 
 def get_feature_names():
-    global _model
+    global _names
     if _model is None:
         _load()
     return _names
