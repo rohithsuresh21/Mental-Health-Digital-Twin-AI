@@ -10,8 +10,6 @@ from sklearn.calibration import calibration_curve
 import matplotlib.pyplot as plt
 from scipy.special import expit
 from sklearn.metrics import f1_score
-from sklearn.preprocessing import StandardScaler
-from sklearn.decomposition import PCA
 
 # Loading the dataset
 X = np.load("X_train.npy")
@@ -43,20 +41,6 @@ y_train = y[train_mask]
 
 X_val = X[val_mask]
 y_val = y[val_mask]
-
-# Standard Scaler
-scaler = StandardScaler()
-X_train = scaler.fit_transform(X_train)
-X_val = scaler.transform(X_val)
-
-pca = PCA(
-    n_components=0.95,
-    random_state=42
-)
-
-X_train = pca.fit_transform(X_train)
-X_val = pca.transform(X_val)
-print(f"PCA reduced features from {X.shape[1]} to {X_train.shape[1]}")
 
 print(f"Train participants: {len(train_uids)}")
 print(f"Validation participants: {len(val_uids)}")
@@ -145,7 +129,7 @@ def compute_ece(y_true, y_prob, n_bins=10):
     return ece
 
 ece_raw = compute_ece(y_val, val_probs)
-print(f"ECE brfore calibration: {ece_raw:.4f}")
+print(f"ECE before calibration: {ece_raw:.4f}")
 
 # Isotonic regression calibration
 # iso = IsotonicRegression(out_of_bounds="clip")
@@ -177,7 +161,6 @@ cal_temp = temperature_scale(val_probs, best_T)
 ece_temp = compute_ece(y_val, cal_temp)
 print(f"Best T: {best_T:.2f}")
 print(f"ECE after temperature scaling: {ece_temp:.4f}")
-
 
 # Platt scaling calibration
 eps = 1e-7
@@ -239,16 +222,6 @@ print(f"temperature.json saved — T={best_T:.2f}")
 with open("platt.pkl", "wb") as f:
     pickle.dump({"A": A,"B":B}, f)
 
-with open("pca.pkl", "wb") as f:
-    pickle.dump(
-        {
-            "scaler": scaler,
-            "pca": pca
-        },
-        f
-    )
-
-print("pca.pkl saved")
 print("model.json saved")
 print("temperature.json saved")
 print("platt.pkl saved")
