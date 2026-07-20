@@ -9,8 +9,8 @@ from typing import Dict, Any, List, Optional, Tuple
 from pathlib import Path
 
 from Stage_1.Extract_features import extract_features
-from stage_2.baseline import UserBaseline
-from stage_2.temporal_bin import TemporalBinning
+from Stage_2.baseline import UserBaseline
+from Stage_2.temporal_bin import TemporalBinning
 from stage_3.tft_model import run_stage3, build_dataframe, extract_latent_and_attention
 from stage_4.detectors.cusum import CUSUMDetector
 from stage_4.anomaly_pipeline import MultiDetectorPipeline
@@ -206,7 +206,8 @@ class UnifiedJournalPipeline:
         num_patches: int = 10,
         hidden_size: int = 64,
         max_epochs: int = 30,
-        batch_size: int = 64
+        batch_size: int = 64,
+        n_entries: int = 100
     ) -> Dict[str, Any]:
         try:
             if not self.normalized_vectors or len(self.normalized_vectors) < 1:
@@ -225,7 +226,8 @@ class UnifiedJournalPipeline:
                 num_patches=num_patches,
                 hidden_size=hidden_size,
                 max_epochs=max_epochs,
-                batch_size=batch_size
+                batch_size=batch_size,
+                n_entries=n_entries
             )
 
             import torch

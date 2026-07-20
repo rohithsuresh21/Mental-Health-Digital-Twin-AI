@@ -54,14 +54,26 @@ def build_dataset(df: pd.DataFrame, feature_dim: int, num_patches: int = 10) -> 
     )
 
 
-def build_tft(dataset: TimeSeriesDataSet, hidden_size: int = 64, dropout: float = 0.1) -> TemporalFusionTransformer:
+def build_tft(
+    dataset: TimeSeriesDataSet,
+    hidden_size: int = 64,
+    dropout: float = 0.1,
+    n_entries: int = 100,
+    learning_rate: float = 1e-3,
+) -> TemporalFusionTransformer:
+
+    if n_entries < 20:
+        dropout = 0.3
+        hidden_size = min(hidden_size, 32)
+        print(f"[TFT] Small dataset ({n_entries} entries) — dropout set to 0.3, hidden_size capped at {hidden_size}")
+
     return TemporalFusionTransformer.from_dataset(
         dataset,
-        learning_rate=1e-3,
+        learning_rate=learning_rate,
         hidden_size=hidden_size,
         attention_head_size=4,
         dropout=dropout,
-        hidden_continuous_size=32,
+        hidden_continuous_size=max(16, hidden_size // 2),
         loss=MAE(),
         log_interval=10,
         reduce_on_plateau_patience=4,
@@ -75,6 +87,7 @@ def train_tft(
     max_epochs: int = 5,
     batch_size: int = 64,
     checkpoint_path: str = "tft_checkpoint.ckpt",
+    learning_rate: float = 1e-3,
 ) -> TemporalFusionTransformer:
 
     train_loader = train_dataset.to_dataloader(train=True,  batch_size=batch_size, num_workers=0)
@@ -94,7 +107,7 @@ def train_tft(
         enable_model_summary=True,
         enable_progress_bar=True,
         callbacks=[checkpoint_callback],
-        accelerator="cpu",  # force CPU to avoid device mismatch on save/load
+        accelerator="cpu",
     )
 
     trainer.fit(tft, train_dataloaders=train_loader, val_dataloaders=val_loader)
@@ -106,9 +119,7 @@ def extract_latent_and_attention(
     dataset: TimeSeriesDataSet,
     batch_size: int = 64,
 ):
-    # Always run inference on CPU to avoid device mismatch
     tft = tft.cpu()
-
     loader        = dataset.to_dataloader(train=False, batch_size=batch_size, num_workers=0)
     all_latents   = []
     all_attention = []
@@ -117,16 +128,15 @@ def extract_latent_and_attention(
     def hook_fn(module, input, output):
         latent_cache["z_t"] = output[1][0][-1].detach()
 
-    hook = tft.lstm_encoder.register_forward_hook(hook_fn)
+    hook = tft.rnn.register_forward_hook(hook_fn)
     tft.eval()
     with torch.no_grad():
         for x, _ in loader:
-            # Move all tensors in batch to CPU
-            x = {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in x.items()}
+            x         = {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in x.items()}
             out       = tft(x)
-            attn      = out["encoder_attention"]
+            attn      = out["attention"]
             attn_mean = attn.mean(dim=1).squeeze(1)
-            z_t       = latent_cache["z_t"]
+            z_t       = latent_cache["z_t"].reshape(latent_cache["z_t"].shape[0], -1)
             all_latents.append(z_t.cpu())
             all_attention.append(attn_mean.cpu())
 
@@ -154,21 +164,54 @@ def run_stage3(
     max_epochs: int = 5,
     batch_size: int = 64,
     checkpoint_path: str = "tft_checkpoint.ckpt",
+    n_entries: int = 100,
 ) -> dict:
 
-    df           = build_dataframe(patched_data)
-    full_dataset = build_dataset(df, feature_dim, num_patches=num_patches)
+    df         = build_dataframe(patched_data)
+    window_ids = df["window_id"].unique().tolist()
+
+    user_prefixes  = list(set("_".join(w.split("_")[:-1]) for w in window_ids))
+    val_window_ids = set()
+    for prefix in user_prefixes:
+        user_windows = sorted([w for w in window_ids if "_".join(w.split("_")[:-1]) == prefix])
+        if len(user_windows) > 4:
+            val_window_ids.update(user_windows[-2:])
+
+    if val_window_ids:
+        train_df = df[~df["window_id"].isin(val_window_ids)].reset_index(drop=True)
+        val_df   = df[df["window_id"].isin(val_window_ids)].reset_index(drop=True)
+        print(f"[TFT] Validation split: {len(val_window_ids)} held-out windows from {len(window_ids)} total")
+    else:
+        train_df = df
+        val_df   = df
+
+    full_dataset  = build_dataset(df,       feature_dim, num_patches=num_patches)
+    train_dataset = build_dataset(train_df, feature_dim, num_patches=num_patches)
+    val_dataset   = TimeSeriesDataSet.from_dataset(train_dataset, val_df, predict=True)
 
     if os.path.exists(checkpoint_path):
-        print(f"[TFT] Loading from checkpoint: {checkpoint_path}")
+        print(f"[TFT] Checkpoint found — loading and fine-tuning (frozen encoder).")
         tft = TemporalFusionTransformer.load_from_checkpoint(checkpoint_path)
-        tft = tft.cpu()  # ensure model is on CPU after loading
+        tft = tft.cpu()
+
+        frozen_count = 0
+        for name, param in tft.named_parameters():
+            if any(x in name for x in ["lstm_encoder", "input_embeddings", "prescalers", "static_covariates_encoder"]):
+                param.requires_grad = False
+                frozen_count += 1
+        print(f"[TFT] Froze {frozen_count} encoder parameter tensors. Fine-tuning decoder only.")
+
+        tft = train_tft(
+            tft, train_dataset, val_dataset,
+            max_epochs=max(2, max_epochs // 3),
+            batch_size=batch_size,
+            checkpoint_path=checkpoint_path,
+            learning_rate=1e-4,
+        )
+
     else:
         print("[TFT] No checkpoint found — training from scratch.")
-        train_dataset = build_dataset(df, feature_dim, num_patches=num_patches)
-        val_dataset   = TimeSeriesDataSet.from_dataset(train_dataset, df, predict=True)
-
-        tft = build_tft(train_dataset, hidden_size=hidden_size)
+        tft = build_tft(train_dataset, hidden_size=hidden_size, n_entries=n_entries)
         tft = train_tft(
             tft, train_dataset, val_dataset,
             max_epochs=max_epochs,
@@ -177,11 +220,19 @@ def run_stage3(
         )
 
     latents, attentions = extract_latent_and_attention(tft, full_dataset, batch_size)
-    umap_coords         = project_umap(latents)
+
+    mean_attention = attentions.mean(dim=0).numpy()
+    print(f"[TFT] Mean attention weight per patch position (1=most recent):")
+    for i, w in enumerate(mean_attention):
+        bar = "█" * int(w * 40)
+        print(f"  Patch {i+1:2d}: {w:.4f}  {bar}")
+
+    umap_coords = project_umap(latents)
 
     return {
-        "model":       tft,
-        "latents":     latents,
-        "attention":   attentions,
-        "umap_coords": umap_coords,
+        "model":                tft,
+        "latents":              latents,
+        "attention":            attentions,
+        "umap_coords":          umap_coords,
+        "mean_patch_attention": mean_attention.tolist(),
     }

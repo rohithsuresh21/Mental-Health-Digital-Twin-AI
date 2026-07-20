@@ -215,6 +215,7 @@ def run_single_user(user_id: str, file_path: Optional[str] = None,
         hidden_size=hidden_size,
         max_epochs=max_epochs,
         batch_size=batch_size,
+        n_entries=n,           
     )
 
     model_dir = Path("calibration/models")
