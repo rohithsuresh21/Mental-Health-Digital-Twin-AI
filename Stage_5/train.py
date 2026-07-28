@@ -128,15 +128,6 @@ def compute_ece(y_true, y_prob, n_bins=10):
 ece_raw = compute_ece(y_val, val_probs)
 print(f"ECE before calibration: {ece_raw:.4f}")
 
-# Isotonic regression calibration
-# iso = IsotonicRegression(out_of_bounds="clip")
-# iso.fit(val_probs, y_val)
-# cal_iso = iso.predict(val_probs)
-# ece_iso = compute_ece(y_val, cal_iso)
-# auroc_iso = roc_auc_score(y_val, cal_iso)
-# print(f"AUROC after isotonic: {auroc_iso:.4f}")
-# print(f"ECE after isotonic: {ece_iso:.4f}")
-
 # Temperature scaling
 def temperature_scale(probs, T):
     # Convert prob to logit, divide by T, convert back
